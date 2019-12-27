@@ -11,123 +11,130 @@
 import Hifi 1.0
 import QtQuick 2.5
 
-import "../controls-uit"
-import "../styles-uit"
-import "../windows"
+import controlsUit 1.0 as HifiControlsUit
+import stylesUit 1.0 as HifiStylesUit
+
+import TabletScriptingInterface 1.0
 
 import "../LoginDialog"
 
-TabletModalWindow {
-    id: realRoot
+FocusScope {
+    id: root
     objectName: "LoginDialog"
+    visible: true
 
-    signal sendToScript(var message);
-    property bool isHMD: false
-    property bool gotoPreviousApp: false;
-    color: hifi.colors.baseGray
-    title: qsTr("Sign in to High Fidelity")
-    property alias titleWidth: root.titleWidth
-    property alias punctuationMode: root.punctuationMode
+    HifiStylesUit.HifiConstants { id: hifi }
 
-    //fake root for shared components expecting root here
-    property var root: QtObject {
-        id: root
+    anchors.fill: parent
 
-        property bool keyboardEnabled: false
-        property bool keyboardRaised: false
-        property bool punctuationMode: false
-        property bool isPassword: false
-        property alias text: loginKeyboard.mirroredText
+    readonly property bool isTablet: true
+    readonly property bool isOverlay: false
 
-        readonly property bool isTablet: true
+    property string iconText: hifi.glyphs.avatar
+    property int iconSize: 35
+    property bool keyboardEnabled: false
+    property bool keyboardRaised: false
+    property bool punctuationMode: false
+    property bool isPassword: false
 
-        property alias title: realRoot.title
-        property real width: realRoot.width
-        property real height: realRoot.height
+    property alias bannerWidth: banner.width
+    property alias bannerHeight: banner.height
 
-        property int titleWidth: 0
-        property string iconText: hifi.glyphs.avatar
-        property int iconSize: 35
+    property int titleWidth: 0
 
-        property var pane: QtObject {
-            property real width: root.width
-            property real height: root.height
-        }
+    property bool isHMD: HMD.active
 
-        function tryDestroy() {
-            canceled()
-        }
-    }
+    // TABLET SPECIFIC PROPERTIES START //
+    property alias text: loginKeyboard.mirroredText
 
-    //property int colorScheme: hifi.colorSchemes.dark
+    width: parent.width
+    height: parent.height
 
-    MouseArea {
-        width: realRoot.width
-        height: realRoot.height
-    }
+    property var tabletProxy: Tablet.getTablet("com.highfidelity.interface.tablet.system")
+
+    property bool gotoPreviousApp: false
 
     property bool keyboardOverride: true
 
     property var items;
     property string label: ""
 
-    //onTitleWidthChanged: d.resize();
-
-    //onKeyboardRaisedChanged: d.resize();
-
-    signal canceled();
-
     property alias bodyLoader: bodyLoader
     property alias loginDialog: loginDialog
     property alias hifi: hifi
 
-    HifiConstants { id: hifi }
-
-    onCanceled: {
-        if (bodyLoader.active === true) {
-            //bodyLoader.active = false
-        }
-        if (gotoPreviousApp) {
-            var tablet = Tablet.getTablet("com.highfidelity.interface.tablet.system");
-            tablet.returnToPreviousApp();
-        } else {
-            Tablet.getTablet("com.highfidelity.interface.tablet.system").gotoHomeScreen();
-        }
+    property var pane: QtObject {
+        property real width: root.width
+        property real height: root.height
     }
 
-    TabletModalFrame {
-        id: mfRoot
-
+    MouseArea {
         width: root.width
-        height: root.height + frameMarginTop + hifi.dimensions.contentMargin.x
+        height: root.height
+    }
+    // TABLET SPECIFIC PROPERTIES END //
 
-        anchors {
-            horizontalCenter: parent.horizontalCenter
-            verticalCenter: parent.verticalCenter
-            verticalCenterOffset: -loginKeyboard.height / 2
-        }
+    function tryDestroy() {
+            tabletProxy.gotoHomeScreen();
+    }
 
-        LoginDialog {
-            id: loginDialog
+    Timer {
+        id: keyboardTimer
+        repeat: false
+        interval: 200
 
-            anchors {
-                fill: parent
-                topMargin: parent.frameMarginTop
-                leftMargin: hifi.dimensions.contentMargin.x
-                rightMargin: hifi.dimensions.contentMargin.x
-                horizontalCenter: parent.horizontalCenter
-            }
-
-            Loader {
-                id: bodyLoader
-                anchors.fill: parent
-                anchors.horizontalCenter: parent.horizontalCenter
-                source: loginDialog.isSteamRunning() ? "../LoginDialog/SignInBody.qml" : "../LoginDialog/LinkAccountBody.qml"
+        onTriggered: {
+            if (MenuInterface.isOptionChecked("Use 3D Keyboard") && root.isHMD) {
+                KeyboardScriptingInterface.raised = true;
             }
         }
     }
 
-    Keyboard {
+    LoginDialog {
+        id: loginDialog
+
+        anchors.fill: parent
+        Loader {
+            id: bodyLoader
+            anchors.fill: parent
+        }
+    }
+
+    Image {
+        z: -10
+        id: loginDialogBackground
+        fillMode: Image.PreserveAspectCrop
+        source: "../LoginDialog/images/background_tablet.png"
+        anchors.fill: parent
+    }
+
+    Rectangle {
+        z: -6
+        id: opaqueRect
+        height: parent.height
+        width: parent.width
+        opacity: 0.65
+        color: "black"
+    }
+
+    Item {
+        z: -5
+        id: bannerContainer
+        width: parent.width
+        height: banner.height
+        anchors {
+            top: parent.top
+            topMargin: 0.18 * parent.height
+        }
+        Image {
+            id: banner
+            anchors.centerIn: parent
+            source: "../../images/high-fidelity-banner.svg"
+            horizontalAlignment: Image.AlignHCenter
+        }
+    }
+
+    HifiControlsUit.Keyboard {
         id: loginKeyboard
         raised: root.keyboardEnabled && root.keyboardRaised
         numeric: root.punctuationMode
@@ -161,16 +168,22 @@ TabletModalWindow {
                 }
                 break
         } else switch (event.key) {
-            case Qt.Key_Escape:
-            case Qt.Key_Back:
-                event.accepted = true
-                destroy()
-                break
-
             case Qt.Key_Enter:
             case Qt.Key_Return:
                 event.accepted = true
                 break
         }
+    }
+
+    Component.onDestruction: {
+        loginKeyboard.raised = false;
+        if (root.isHMD) {
+            KeyboardScriptingInterface.raised = false;
+        }
+    }
+
+    Component.onCompleted: {
+        keyboardTimer.start();
+        bodyLoader.setSource("../LoginDialog/LinkAccountBody.qml", { "loginDialog": loginDialog, "root": root, "bodyLoader": bodyLoader, "linkSteam": false, "linkOculus": false });
     }
 }

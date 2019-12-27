@@ -111,7 +111,7 @@ bool EntityTreeSendThread::traverseTreeAndSendContents(SharedNodePointer node, O
         int32_t lodLevelOffset = nodeData->getBoundaryLevelAdjust() + (viewFrustumChanged ? LOW_RES_MOVING_ADJUST : NO_BOUNDARY_ADJUST);
         newView.lodScaleFactor = powf(2.0f, lodLevelOffset);
         
-        startNewTraversal(newView, root);
+        startNewTraversal(newView, root, isFullScene);
 
         // When the viewFrustum changed the sort order may be incorrect, so we re-sort
         // and also use the opportunity to cull anything no longer in view
@@ -160,6 +160,11 @@ bool EntityTreeSendThread::traverseTreeAndSendContents(SharedNodePointer node, O
     if (sendComplete && nodeData->wantReportInitialCompletion() && _traversal.finished()) {
         // Dealt with all nearby entities.
         nodeData->setReportInitialCompletion(false);
+        // initial stats and entity packets are reliable until the initial query is complete
+        // to guarantee all entity data is available for safe landing/physics start.  Afterwards
+        // the packets are unreliable for performance.
+        nodeData->stats.getStatsMessage().setReliable(false);
+        nodeData->getPacket().setReliable(false);
 
         // Send EntityQueryInitialResultsComplete reliable packet ...
         auto initialCompletion = NLPacket::create(PacketType::EntityQueryInitialResultsComplete,
@@ -220,9 +225,10 @@ bool EntityTreeSendThread::addDescendantsToExtraFlaggedEntities(const QUuid& fil
     return hasNewChild || hasNewDescendants;
 }
 
-void EntityTreeSendThread::startNewTraversal(const DiffTraversal::View& view, EntityTreeElementPointer root) {
+void EntityTreeSendThread::startNewTraversal(const DiffTraversal::View& view, EntityTreeElementPointer root,
+                                             bool forceFirstPass) {
 
-    DiffTraversal::Type type = _traversal.prepareNewTraversal(view, root);
+    DiffTraversal::Type type = _traversal.prepareNewTraversal(view, root, forceFirstPass);
     // there are three types of traversal:
     //
     //      (1) FirstTime = at login --> find everything in view
@@ -371,7 +377,7 @@ bool EntityTreeSendThread::traverseTreeAndBuildNextPacketPayload(EncodeBitstream
                     // Record explicitly filtered-in entity so that extra entities can be flagged.
                     entityNodeData->insertSentFilteredEntity(entityID);
                 }
-                OctreeElement::AppendState appendEntityState = entity->appendEntityData(&_packetData, params, _extraEncodeData);
+                OctreeElement::AppendState appendEntityState = entity->appendEntityData(&_packetData, params, _extraEncodeData, entityNode->getCanGetAndSetPrivateUserData());
 
                 if (appendEntityState != OctreeElement::COMPLETED) {
                     if (appendEntityState == OctreeElement::PARTIAL) {

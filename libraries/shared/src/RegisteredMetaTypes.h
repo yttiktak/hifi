@@ -25,18 +25,20 @@
 #include "shared/Bilateral.h"
 #include "Transform.h"
 #include "PhysicsCollisionGroups.h"
+#include "StencilMaskMode.h"
 
 class QColor;
 class QUrl;
 
-Q_DECLARE_METATYPE(glm::vec4)
-Q_DECLARE_METATYPE(glm::vec3)
 Q_DECLARE_METATYPE(glm::vec2)
+Q_DECLARE_METATYPE(glm::u8vec3)
+Q_DECLARE_METATYPE(glm::vec3)
+Q_DECLARE_METATYPE(glm::vec4)
 Q_DECLARE_METATYPE(glm::quat)
 Q_DECLARE_METATYPE(glm::mat4)
-Q_DECLARE_METATYPE(xColor)
-Q_DECLARE_METATYPE(QVector<glm::vec3>)
 Q_DECLARE_METATYPE(QVector<float>)
+Q_DECLARE_METATYPE(unsigned int)
+Q_DECLARE_METATYPE(QVector<unsigned int>)
 Q_DECLARE_METATYPE(AACube)
 Q_DECLARE_METATYPE(std::function<void()>);
 Q_DECLARE_METATYPE(std::function<QVariant()>);
@@ -44,8 +46,129 @@ Q_DECLARE_METATYPE(std::function<QVariant()>);
 void registerMetaTypes(QScriptEngine* engine);
 
 // Mat4
+/**jsdoc
+ * A 4 x 4 matrix, typically containing a scale, rotation, and translation transform. See also the {@link Mat4(0)|Mat4} object.
+ *
+ * @typedef {object} Mat4
+ * @property {number} r0c0 - Row 0, column 0 value.
+ * @property {number} r1c0 - Row 1, column 0 value.
+ * @property {number} r2c0 - Row 2, column 0 value.
+ * @property {number} r3c0 - Row 3, column 0 value.
+ * @property {number} r0c1 - Row 0, column 1 value.
+ * @property {number} r1c1 - Row 1, column 1 value.
+ * @property {number} r2c1 - Row 2, column 1 value.
+ * @property {number} r3c1 - Row 3, column 1 value.
+ * @property {number} r0c2 - Row 0, column 2 value.
+ * @property {number} r1c2 - Row 1, column 2 value.
+ * @property {number} r2c2 - Row 2, column 2 value.
+ * @property {number} r3c2 - Row 3, column 2 value.
+ * @property {number} r0c3 - Row 0, column 3 value.
+ * @property {number} r1c3 - Row 1, column 3 value.
+ * @property {number} r2c3 - Row 2, column 3 value.
+ * @property {number} r3c3 - Row 3, column 3 value.
+ */
 QScriptValue mat4toScriptValue(QScriptEngine* engine, const glm::mat4& mat4);
 void mat4FromScriptValue(const QScriptValue& object, glm::mat4& mat4);
+
+QVariant mat4ToVariant(const glm::mat4& mat4);
+glm::mat4 mat4FromVariant(const QVariant& object, bool& valid);
+glm::mat4 mat4FromVariant(const QVariant& object);
+
+/**jsdoc
+* A 2-dimensional vector.
+*
+* @typedef {object} Vec2
+* @property {number} x - X-coordinate of the vector. Synonyms: <code>u</code>.
+* @property {number} y - Y-coordinate of the vector. Synonyms: <code>v</code>.
+* @example <caption>Vec2s can be set in multiple ways and modified with their aliases, but still stringify in the same way</caption>
+* Entities.editEntity(<id>, { materialMappingPos: { x: 0.1, y: 0.2 }});          // { x: 0.1, y: 0.2 }
+* Entities.editEntity(<id>, { materialMappingPos: { u: 0.3, v: 0.4 }});          // { x: 0.3, y: 0.4 }
+* Entities.editEntity(<id>, { materialMappingPos: [0.5, 0.6] });                 // { x: 0.5, y: 0.6 }
+* Entities.editEntity(<id>, { materialMappingPos: 0.7 });                        // { x: 0.7, y: 0.7 }
+* var color = Entities.getEntityProperties(<id>).materialMappingPos;             // { x: 0.7, y: 0.7 }
+* color.v = 0.8;                                                                 // { x: 0.7, y: 0.8 }
+*/
+QScriptValue vec2ToScriptValue(QScriptEngine* engine, const glm::vec2& vec2);
+void vec2FromScriptValue(const QScriptValue& object, glm::vec2& vec2);
+
+QVariant vec2ToVariant(const glm::vec2& vec2);
+glm::vec2 vec2FromVariant(const QVariant& object, bool& valid);
+glm::vec2 vec2FromVariant(const QVariant& object);
+
+/**jsdoc
+* A 3-dimensional vector. See also the {@link Vec3(0)|Vec3} object.
+*
+* @typedef {object} Vec3
+* @property {number} x - X-coordinate of the vector. Synonyms: <code>r</code>, <code>red</code>.
+* @property {number} y - Y-coordinate of the vector. Synonyms: <code>g</code>, <code>green</code>.
+* @property {number} z - Z-coordinate of the vector. Synonyms: <code>b</code>, <code>blue</code>.
+* @example <caption>Vec3 values can be set in multiple ways and modified with their aliases, but still stringify in the same 
+*     way.</caption>
+* Entities.editEntity(<id>, { position: { x: 1, y: 2, z: 3 }});                 // { x: 1, y: 2, z: 3 }
+* Entities.editEntity(<id>, { position: { r: 4, g: 5, b: 6 }});                 // { x: 4, y: 5, z: 6 }
+* Entities.editEntity(<id>, { position: { red: 7, green: 8, blue: 9 }});        // { x: 7, y: 8, z: 9 }
+* Entities.editEntity(<id>, { position: [10, 11, 12] });                        // { x: 10, y: 11, z: 12 }
+* Entities.editEntity(<id>, { position: 13 });                                  // { x: 13, y: 13, z: 13 }
+* var position = Entities.getEntityProperties(<id>).position;                   // { x: 13, y: 13, z: 13 }
+* position.g = 14;                                                              // { x: 13, y: 14, z: 13 }
+* position.blue = 15;                                                           // { x: 13, y: 14, z: 15 }
+* Entities.editEntity(<id>, { position: "red"});                                // { x: 255, y: 0, z: 0 }
+* Entities.editEntity(<id>, { position: "#00FF00"});                            // { x: 0, y: 255, z: 0 }
+*/
+QScriptValue vec3ToScriptValue(QScriptEngine* engine, const glm::vec3& vec3);
+QScriptValue vec3ColorToScriptValue(QScriptEngine* engine, const glm::vec3& vec3);
+void vec3FromScriptValue(const QScriptValue& object, glm::vec3& vec3);
+
+QVariant vec3toVariant(const glm::vec3& vec3);
+glm::vec3 vec3FromVariant(const QVariant &object, bool& valid);
+glm::vec3 vec3FromVariant(const QVariant &object);
+
+/**jsdoc
+ * A color vector. See also the {@link Vec3(0)|Vec3} object.
+ *
+ * @typedef {object} Color
+ * @property {number} red - Red component value. Integer in the range <code>0</code> - <code>255</code>.  Synonyms: <code>r</code>, <code>x</code>.
+ * @property {number} green - Green component value. Integer in the range <code>0</code> - <code>255</code>.  Synonyms: <code>g</code>, <code>y</code>.
+ * @property {number} blue - Blue component value. Integer in the range <code>0</code> - <code>255</code>.  Synonyms: <code>b</code>, <code>z</code>.
+ * @example <caption>Colors can be set in multiple ways and modified with their aliases, but still stringify in the same way</caption>
+ * Entities.editEntity(<id>, { color: { x: 1, y: 2, z: 3 }});                 // { red: 1, green: 2, blue: 3 }
+ * Entities.editEntity(<id>, { color: { r: 4, g: 5, b: 6 }});                 // { red: 4, green: 5, blue: 6 }
+ * Entities.editEntity(<id>, { color: { red: 7, green: 8, blue: 9 }});        // { red: 7, green: 8, blue: 9 }
+ * Entities.editEntity(<id>, { color: [10, 11, 12] });                        // { red: 10, green: 11, blue: 12 }
+ * Entities.editEntity(<id>, { color: 13 });                                  // { red: 13, green: 13, blue: 13 }
+ * var color = Entities.getEntityProperties(<id>).color;                      // { red: 13, green: 13, blue: 13 }
+ * color.g = 14;                                                              // { red: 13, green: 14, blue: 13 }
+ * color.blue = 15;                                                           // { red: 13, green: 14, blue: 15 }
+ * Entities.editEntity(<id>, { color: "red"});                                // { red: 255, green: 0, blue: 0 }
+ * Entities.editEntity(<id>, { color: "#00FF00"});                            // { red: 0, green: 255, blue: 0 }
+ */
+/**jsdoc
+ * A color vector with real values. Values may also be <code>null</code>. See also the {@link Vec3(0)|Vec3} object.
+ *
+ * @typedef {object} ColorFloat
+ * @property {number} red - Red component value. Real in the range <code>0</code> - <code>255</code>.  Synonyms: <code>r</code>, <code>x</code>.
+ * @property {number} green - Green component value. Real in the range <code>0</code> - <code>255</code>.  Synonyms: <code>g</code>, <code>y</code>.
+ * @property {number} blue - Blue component value. Real in the range <code>0</code> - <code>255</code>.  Synonyms: <code>b</code>, <code>z</code>.
+ * @example <caption>ColorFloats can be set in multiple ways and modified with their aliases, but still stringify in the same way</caption>
+ * Entities.editEntity(<id>, { color: { x: 1, y: 2, z: 3 }});                 // { red: 1, green: 2, blue: 3 }
+ * Entities.editEntity(<id>, { color: { r: 4, g: 5, b: 6 }});                 // { red: 4, green: 5, blue: 6 }
+ * Entities.editEntity(<id>, { color: { red: 7, green: 8, blue: 9 }});        // { red: 7, green: 8, blue: 9 }
+ * Entities.editEntity(<id>, { color: [10, 11, 12] });                        // { red: 10, green: 11, blue: 12 }
+ * Entities.editEntity(<id>, { color: 13 });                                  // { red: 13, green: 13, blue: 13 }
+ * var color = Entities.getEntityProperties(<id>).color;                      // { red: 13, green: 13, blue: 13 }
+ * color.g = 14;                                                              // { red: 13, green: 14, blue: 13 }
+ * color.blue = 15;                                                           // { red: 13, green: 14, blue: 15 }
+ * Entities.editEntity(<id>, { color: "red"});                                // { red: 255, green: 0, blue: 0 }
+ * Entities.editEntity(<id>, { color: "#00FF00"});                            // { red: 0, green: 255, blue: 0 }
+ */
+QScriptValue u8vec3ToScriptValue(QScriptEngine* engine, const glm::u8vec3& vec3);
+QScriptValue u8vec3ColorToScriptValue(QScriptEngine* engine, const glm::u8vec3& vec3);
+void u8vec3FromScriptValue(const QScriptValue& object, glm::u8vec3& vec3);
+
+QVariant u8vec3toVariant(const glm::u8vec3& vec3);
+QVariant u8vec3ColortoVariant(const glm::u8vec3& vec3);
+glm::u8vec3 u8vec3FromVariant(const QVariant &object, bool& valid);
+glm::u8vec3 u8vec3FromVariant(const QVariant &object);
 
 /**jsdoc
  * A 4-dimensional vector.
@@ -56,35 +179,11 @@ void mat4FromScriptValue(const QScriptValue& object, glm::mat4& mat4);
  * @property {number} z - Z-coordinate of the vector.
  * @property {number} w - W-coordinate of the vector.
  */
-// Vec4
 QScriptValue vec4toScriptValue(QScriptEngine* engine, const glm::vec4& vec4);
 void vec4FromScriptValue(const QScriptValue& object, glm::vec4& vec4);
 QVariant vec4toVariant(const glm::vec4& vec4);
 glm::vec4 vec4FromVariant(const QVariant &object, bool& valid);
 glm::vec4 vec4FromVariant(const QVariant &object);
-
-// Vec3
-QScriptValue vec3toScriptValue(QScriptEngine* engine, const glm::vec3 &vec3);
-void vec3FromScriptValue(const QScriptValue &object, glm::vec3 &vec3);
-
-QVariant vec3toVariant(const glm::vec3& vec3);
-glm::vec3 vec3FromVariant(const QVariant &object, bool& valid);
-glm::vec3 vec3FromVariant(const QVariant &object);
-
-/**jsdoc
- * A 2-dimensional vector.
- *
- * @typedef {object} Vec2
- * @property {number} x - X-coordinate of the vector.
- * @property {number} y - Y-coordinate of the vector.
- */
-// Vec2
-QScriptValue vec2toScriptValue(QScriptEngine* engine, const glm::vec2 &vec2);
-void vec2FromScriptValue(const QScriptValue &object, glm::vec2 &vec2);
-
-QVariant vec2toVariant(const glm::vec2 &vec2);
-glm::vec2 vec2FromVariant(const QVariant &object, bool& valid);
-glm::vec2 vec2FromVariant(const QVariant &object);
 
 // Quaternions
 QScriptValue quatToScriptValue(QScriptEngine* engine, const glm::quat& quat);
@@ -94,24 +193,25 @@ QVariant quatToVariant(const glm::quat& quat);
 glm::quat quatFromVariant(const QVariant &object, bool& isValid);
 glm::quat quatFromVariant(const QVariant &object);
 
-// Rect
+/**jsdoc
+ * Defines a rectangular portion of an image or screen, or similar.
+ * @typedef {object} Rect
+ * @property {number} x - Left, x-coordinate value.
+ * @property {number} y - Top, y-coordinate value.
+ * @property {number} width - Width of the rectangle.
+ * @property {number} height - Height of the rectangle.
+ */
 QScriptValue qRectToScriptValue(QScriptEngine* engine, const QRect& rect);
 void qRectFromScriptValue(const QScriptValue& object, QRect& rect);
 QRect qRectFromVariant(const QVariant& object, bool& isValid);
 QRect qRectFromVariant(const QVariant& object);
 QVariant qRectToVariant(const QRect& rect);
+
 QScriptValue qRectFToScriptValue(QScriptEngine* engine, const QRectF& rect);
 void qRectFFromScriptValue(const QScriptValue& object, QRectF& rect);
 QRectF qRectFFromVariant(const QVariant& object, bool& isValid);
 QRectF qRectFFromVariant(const QVariant& object);
 QVariant qRectFToVariant(const QRectF& rect);
-
-// xColor
-QScriptValue xColorToScriptValue(QScriptEngine* engine, const xColor& color);
-void xColorFromScriptValue(const QScriptValue &object, xColor& color);
-
-QVariant xColorToVariant(const xColor& color);
-xColor xColorFromVariant(const QVariant &object, bool& isValid);
 
 // QColor
 QScriptValue qColorToScriptValue(QScriptEngine* engine, const QColor& color);
@@ -121,11 +221,14 @@ QScriptValue qURLToScriptValue(QScriptEngine* engine, const QUrl& url);
 void qURLFromScriptValue(const QScriptValue& object, QUrl& url);
 
 // vector<vec3>
+Q_DECLARE_METATYPE(QVector<glm::vec3>)
 QScriptValue qVectorVec3ToScriptValue(QScriptEngine* engine, const QVector<glm::vec3>& vector);
+QScriptValue qVectorVec3ColorToScriptValue(QScriptEngine* engine, const QVector<glm::vec3>& vector);
 void qVectorVec3FromScriptValue(const QScriptValue& array, QVector<glm::vec3>& vector);
 QVector<glm::vec3> qVectorVec3FromScriptValue(const QScriptValue& array);
 
 // vector<quat>
+Q_DECLARE_METATYPE(QVector<glm::quat>)
 QScriptValue qVectorQuatToScriptValue(QScriptEngine* engine, const QVector<glm::quat>& vector);
 void qVectorQuatFromScriptValue(const QScriptValue& array, QVector<glm::quat>& vector);
 QVector<glm::quat> qVectorQuatFromScriptValue(const QScriptValue& array);
@@ -158,12 +261,12 @@ public:
 };
 
 /**jsdoc
- * A PickRay defines a vector with a starting point. It is used, for example, when finding entities or overlays that lie under a
- * mouse click or intersect a laser beam.
+ * A vector with a starting point. It is used, for example, when finding entities or avatars that lie under a mouse click or 
+ * intersect a laser beam.
  *
  * @typedef {object} PickRay
- * @property {Vec3} origin - The starting position of the PickRay.
- * @property {Vec3} direction - The direction that the PickRay travels.
+ * @property {Vec3} origin - The starting position of the ray.
+ * @property {Vec3} direction - The direction that the ray travels.
  */
 class PickRay : public MathPick {
 public:
@@ -191,23 +294,27 @@ QScriptValue pickRayToScriptValue(QScriptEngine* engine, const PickRay& pickRay)
 void pickRayFromScriptValue(const QScriptValue& object, PickRay& pickRay);
 
 /**jsdoc
- * A StylusTip defines the tip of a stylus.
+ * The tip of a stylus.
  *
  * @typedef {object} StylusTip
- * @property {number} side - The hand the tip is attached to: <code>0</code> for left, <code>1</code> for right.
+ * @property {number} side - The hand that the stylus is attached to: <code>0</code> for left hand, <code>1</code> for the 
+ *     right hand, <code>-1</code> for invalid.
+ * @property {Vec3} tipOffset - The position of the stylus tip relative to the body of the stylus.
  * @property {Vec3} position - The position of the stylus tip.
- * @property {Quat} orientation - The orientation of the stylus tip.
+ * @property {Quat} orientation - The orientation of the stylus.
  * @property {Vec3} velocity - The velocity of the stylus tip.
  */
 class StylusTip : public MathPick {
 public:
     StylusTip() : position(NAN), velocity(NAN) {}
-    StylusTip(const bilateral::Side& side, const glm::vec3& position = Vectors::ZERO, const glm::quat& orientation = Quaternions::IDENTITY, const glm::vec3& velocity = Vectors::ZERO) :
-        side(side), position(position), orientation(orientation), velocity(velocity) {}
-    StylusTip(const QVariantMap& pickVariant) : side(bilateral::Side(pickVariant["side"].toInt())), position(vec3FromVariant(pickVariant["position"])),
-        orientation(quatFromVariant(pickVariant["orientation"])), velocity(vec3FromVariant(pickVariant["velocity"])) {}
+    StylusTip(const bilateral::Side& side, const glm::vec3& tipOffset = Vectors::ZERO ,const glm::vec3& position = Vectors::ZERO,
+              const glm::quat& orientation = Quaternions::IDENTITY, const glm::vec3& velocity = Vectors::ZERO) :
+        side(side), tipOffset(tipOffset), position(position), orientation(orientation), velocity(velocity) {}
+    StylusTip(const QVariantMap& pickVariant) : side(bilateral::Side(pickVariant["side"].toInt())), tipOffset(vec3FromVariant(pickVariant["tipOffset"])),
+        position(vec3FromVariant(pickVariant["position"])), orientation(quatFromVariant(pickVariant["orientation"])), velocity(vec3FromVariant(pickVariant["velocity"])) {}
 
     bilateral::Side side { bilateral::Side::Invalid };
+    glm::vec3 tipOffset;
     glm::vec3 position;
     glm::quat orientation;
     glm::vec3 velocity;
@@ -215,12 +322,13 @@ public:
     operator bool() const override { return side != bilateral::Side::Invalid; }
 
     bool operator==(const StylusTip& other) const {
-        return (side == other.side && position == other.position && orientation == other.orientation && velocity == other.velocity);
+        return (side == other.side && tipOffset == other.tipOffset && position == other.position && orientation == other.orientation && velocity == other.velocity);
     }
 
     QVariantMap toVariantMap() const override {
         QVariantMap stylusTip;
         stylusTip["side"] = (int)side;
+        stylusTip["tipOffset"] = vec3toVariant(tipOffset);
         stylusTip["position"] = vec3toVariant(position);
         stylusTip["orientation"] = quatToVariant(orientation);
         stylusTip["velocity"] = vec3toVariant(velocity);
@@ -229,12 +337,16 @@ public:
 };
 
 /**jsdoc
-* A PickParabola defines a parabola with a starting point, intitial velocity, and acceleration.
+* A parabola defined by a starting point, initial velocity, and acceleration. It is used, for example, when finding entities or
+* avatars that intersect a parabolic beam.
 *
 * @typedef {object} PickParabola
-* @property {Vec3} origin - The starting position of the PickParabola.
-* @property {Vec3} velocity - The starting velocity of the parabola.
-* @property {Vec3} acceleration - The acceleration that the parabola experiences.
+* @property {Vec3} origin - The starting position of the parabola, i.e., the initial position of a virtual projectile whose 
+*     trajectory defines the parabola.
+* @property {Vec3} velocity - The starting velocity of the parabola in m/s, i.e., the initial speed of a virtual projectile 
+*     whose trajectory defines the parabola.
+* @property {Vec3} acceleration - The acceleration that the parabola experiences in m/s<sup>2</sup>, i.e., the acceleration of 
+*     a virtual projectile whose trajectory defines the parabola, both magnitude and direction.
 */
 class PickParabola : public MathPick {
 public:
@@ -260,23 +372,6 @@ public:
     }
 };
 
-// TODO: Add "loaded" to CollisionRegion jsdoc once model collision picks are supported.
-
-/**jsdoc
-* A CollisionRegion defines a volume for checking collisions in the physics simulation.
-
-* @typedef {object} CollisionRegion
-* @property {Shape} shape - The information about the collision region's size and shape. Dimensions are in world space, but will scale with the parent if defined.
-* @property {Vec3} position - The position of the collision region, relative to a parent if defined.
-* @property {Quat} orientation - The orientation of the collision region, relative to a parent if defined.
-* @property {float} threshold - The approximate minimum penetration depth for a test object to be considered in contact with the collision region.
-* The depth is measured in world space, but will scale with the parent if defined.
-* @property {CollisionMask} [collisionGroup=8] - The type of object this collision pick collides as. Objects whose collision masks overlap with the pick's collision group
-* will be considered colliding with the pick.
-* @property {Uuid} parentID - The ID of the parent, either an avatar, an entity, or an overlay.
-* @property {number} parentJointIndex - The joint of the parent to parent to, for example, the joints on the model of an avatar. (default = 0, no joint)
-* @property {string} joint - If "Mouse," parents the pick to the mouse. If "Avatar," parents the pick to MyAvatar's head. Otherwise, parents to the joint of the given name on MyAvatar.
-*/
 class CollisionRegion : public MathPick {
 public:
     CollisionRegion() { }
@@ -330,6 +425,30 @@ public:
             collisionGroup = pickVariant["collisionGroup"].toUInt();
         }
     }
+
+    /**jsdoc
+     * A volume for checking collisions in the physics simulation.
+     * @typedef {object} CollisionRegion
+     * @property {Shape} shape - The collision region's shape and size. Dimensions are in world coordinates, but scale with the 
+     *     parent if defined.
+     * @property {boolean} loaded - <code>true</code> if the <code>shape</code> has no model, or has a model and it is loaded, 
+     *     <code>false</code> if otherwise.
+     * @property {Vec3} position - The position of the collision region, relative to the parent if defined.
+     * @property {Quat} orientation - The orientation of the collision region, relative to the parent if defined.
+     * @property {number} threshold - The approximate minimum penetration depth for a test object to be considered in contact with
+     *     the collision region. The depth is in world coordinates but scales with the parent if defined.
+     * @property {CollisionMask} [collisionGroup=8] - The type of objects the collision region collides as. Objects whose collision
+     *     masks overlap with the region's collision group are considered to be colliding with the region.
+     */
+
+    /**jsdoc
+     * A physical volume.
+     * @typedef {object} Shape
+     * @property {ShapeType} shapeType="none" - The type of shape.
+     * @property {string} [modelUrl=""] - The model to load to for the shape if <code>shapeType</code> is one of
+     *     <code>"compound"</code>, <code>"simple-hull"</code>, <code>"simple-compound"</code>, or <code>"static-mesh"</code>.
+     * @property {Vec3} dimensions - The dimensions of the shape.
+     */
 
     QVariantMap toVariantMap() const override {
         QVariantMap collisionRegion;
@@ -485,7 +604,7 @@ namespace std {
 }
 
 /**jsdoc
- * <p>The type of a collision contact event.
+ * <p>The type of a collision contact event.</p>
  * <table>
  *   <thead>
  *     <tr><th>Value</th><th>Description</th></tr>
@@ -524,6 +643,12 @@ Q_DECLARE_METATYPE(Collision)
 QScriptValue collisionToScriptValue(QScriptEngine* engine, const Collision& collision);
 void collisionFromScriptValue(const QScriptValue &object, Collision& collision);
 
+/**jsdoc
+ * UUIDs (Universally Unique IDentifiers) are used to uniquely identify entities, avatars, and the like. They are represented 
+ * in JavaScript as strings in the format, <code>"{nnnnnnnn-nnnn-nnnn-nnnn-nnnnnnnnnnnn}"</code>, where the "n"s are
+ * hexadecimal digits.
+ * @typedef {string} Uuid
+ */
 //Q_DECLARE_METATYPE(QUuid) // don't need to do this for QUuid since it's already a meta type
 QScriptValue quuidToScriptValue(QScriptEngine* engine, const QUuid& uuid);
 void quuidFromScriptValue(const QScriptValue& object, QUuid& uuid);
@@ -567,6 +692,7 @@ using MeshPointer = std::shared_ptr<graphics::Mesh>;
  *
  * @hifi-interface
  * @hifi-client-entity
+ * @hifi-avatar
  * @hifi-server-entity
  * @hifi-assignment-client
  *
@@ -582,7 +708,6 @@ public:
      * Get the number of vertices in the mesh.
      * @function MeshProxy#getNumVertices
      * @returns {number} Integer number of vertices in the mesh.
-     * @deprecated Use the {@link Graphics} API instead.
      */
     Q_INVOKABLE virtual int getNumVertices() const = 0;
 
@@ -591,7 +716,6 @@ public:
      * @function MeshProxy#getPos
      * @param {number} index - Integer index of the mesh vertex.
      * @returns {Vec3} Local position of the vertex relative to the mesh.
-     * @deprecated Use the {@link Graphics} API instead.
      */
     Q_INVOKABLE virtual glm::vec3 getPos(int index) const = 0;
     Q_INVOKABLE virtual glm::vec3 getPos3(int index) const { return getPos(index); } // deprecated
@@ -627,5 +751,10 @@ void meshFaceFromScriptValue(const QScriptValue &object, MeshFace& meshFaceResul
 QScriptValue qVectorMeshFaceToScriptValue(QScriptEngine* engine, const QVector<MeshFace>& vector);
 void qVectorMeshFaceFromScriptValue(const QScriptValue& array, QVector<MeshFace>& result);
 
+QVariantMap parseTexturesToMap(QString textures, const QVariantMap& defaultTextures);
+
+Q_DECLARE_METATYPE(StencilMaskMode)
+QScriptValue stencilMaskModeToScriptValue(QScriptEngine* engine, const StencilMaskMode& stencilMode);
+void stencilMaskModeFromScriptValue(const QScriptValue& object, StencilMaskMode& stencilMode);
 
 #endif // hifi_RegisteredMetaTypes_h

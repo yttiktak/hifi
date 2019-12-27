@@ -6,6 +6,8 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 #include "PickManager.h"
+#include "PerfStat.h"
+#include "Profile.h"
 
 PickManager::PickManager() {
     setShouldPickHUDOperator([]() { return false; });
@@ -38,13 +40,42 @@ std::shared_ptr<PickQuery> PickManager::findPick(unsigned int uid) const {
 
 void PickManager::removePick(unsigned int uid) {
     withWriteLock([&] {
-        auto type = _typeMap.find(uid);
-        if (type != _typeMap.end()) {
-            _picks[type->second].erase(uid);
-            _typeMap.erase(uid);
-            _totalPickCounts[type->second]--;
+        auto typeIt = _typeMap.find(uid);
+        if (typeIt != _typeMap.end()) {
+            _picks[typeIt->second].erase(uid);
+            _totalPickCounts[typeIt->second]--;
+            _typeMap.erase(typeIt);
         }
     });
+}
+
+QVariantMap PickManager::getPickProperties(unsigned int uid) const {
+    auto pick = findPick(uid);
+    if (pick) {
+        return pick->toVariantMap();
+    }
+    return QVariantMap();
+}
+
+QVariantMap PickManager::getPickScriptParameters(unsigned int uid) const {
+    auto pick = findPick(uid);
+    if (pick) {
+        return pick->getScriptParameters();
+    }
+    return QVariantMap();
+}
+
+QVector<unsigned int> PickManager::getPicks() const {
+    QVector<unsigned int> picks;
+    withReadLock([&] {
+        for (auto typeIt = _picks.cbegin(); typeIt != _picks.cend(); ++typeIt) {
+            auto& picksForType = typeIt->second;
+            for (auto pickIt = picksForType.cbegin(); pickIt != picksForType.cend(); ++pickIt) {
+                picks.push_back(pickIt->first);
+            }
+        }
+    });
+    return picks;
 }
 
 PickResultPointer PickManager::getPrevPickResult(unsigned int uid) const {
@@ -67,6 +98,14 @@ void PickManager::disablePick(unsigned int uid) const {
     if (pick) {
         pick->disable();
     }
+}
+
+bool PickManager::isPickEnabled(unsigned int uid) const {
+    auto pick = findPick(uid);
+    if (pick) {
+        return pick->isEnabled();
+    }
+    return false;
 }
 
 void PickManager::setPrecisionPicking(unsigned int uid, bool precisionPicking) const {
@@ -119,10 +158,26 @@ void PickManager::update() {
     bool shouldPickHUD = _shouldPickHUDOperator();
     // FIXME: give each type its own expiry
     // Each type will update at least one pick, regardless of the expiry
-    _updatedPickCounts[PickQuery::Stylus] = _stylusPickCacheOptimizer.update(cachedPicks[PickQuery::Stylus], _nextPickToUpdate[PickQuery::Stylus], expiry, false);
-    _updatedPickCounts[PickQuery::Ray] = _rayPickCacheOptimizer.update(cachedPicks[PickQuery::Ray], _nextPickToUpdate[PickQuery::Ray], expiry, shouldPickHUD);
-    _updatedPickCounts[PickQuery::Parabola] = _parabolaPickCacheOptimizer.update(cachedPicks[PickQuery::Parabola], _nextPickToUpdate[PickQuery::Parabola], expiry, shouldPickHUD);
-    _updatedPickCounts[PickQuery::Collision] = _collisionPickCacheOptimizer.update(cachedPicks[PickQuery::Collision], _nextPickToUpdate[PickQuery::Collision], expiry, false);
+    {
+        PROFILE_RANGE_EX(picks, "StylusPicks", 0xffff0000, (uint64_t)_totalPickCounts[PickQuery::Stylus]);
+        PerformanceTimer perfTimer("StylusPicks");
+        _updatedPickCounts[PickQuery::Stylus] = _stylusPickCacheOptimizer.update(cachedPicks[PickQuery::Stylus], _nextPickToUpdate[PickQuery::Stylus], expiry, false);
+    }
+    {
+        PROFILE_RANGE_EX(picks, "RayPicks", 0xffff0000, (uint64_t)_totalPickCounts[PickQuery::Ray]);
+        PerformanceTimer perfTimer("RayPicks");
+        _updatedPickCounts[PickQuery::Ray] = _rayPickCacheOptimizer.update(cachedPicks[PickQuery::Ray], _nextPickToUpdate[PickQuery::Ray], expiry, shouldPickHUD);
+    }
+    {
+        PROFILE_RANGE_EX(picks, "ParabolaPicks", 0xffff0000, (uint64_t)_totalPickCounts[PickQuery::Parabola]);
+        PerformanceTimer perfTimer("ParabolaPicks");
+        _updatedPickCounts[PickQuery::Parabola] = _parabolaPickCacheOptimizer.update(cachedPicks[PickQuery::Parabola], _nextPickToUpdate[PickQuery::Parabola], expiry, shouldPickHUD);
+    }
+    {
+        PROFILE_RANGE_EX(picks, "CollisionPicks", 0xffff0000, (uint64_t)_totalPickCounts[PickQuery::Collision]);
+        PerformanceTimer perfTimer("CollisionPicks");
+        _updatedPickCounts[PickQuery::Collision] = _collisionPickCacheOptimizer.update(cachedPicks[PickQuery::Collision], _nextPickToUpdate[PickQuery::Collision], expiry, false);
+    }
 }
 
 bool PickManager::isLeftHand(unsigned int uid) {

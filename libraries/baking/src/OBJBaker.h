@@ -13,12 +13,8 @@
 #define hifi_OBJBaker_h
 
 #include "Baker.h"
-#include "TextureBaker.h"
 #include "ModelBaker.h"
-
 #include "ModelBakingLoggingCategory.h"
-
-using TextureBakerThreadGetter = std::function<QThread*()>;
 
 using NodeID = qlonglong;
 
@@ -27,25 +23,15 @@ class OBJBaker : public ModelBaker {
 public:
     using ModelBaker::ModelBaker;
 
-public slots:
-    virtual void bake() override;
-
-signals:
-    void OBJLoaded();
-
-private slots:
-    void bakeOBJ();
-    void handleOBJNetworkReply();
+protected:
+    virtual void bakeProcessedSource(const hfm::Model::Pointer& hfmModel, const std::vector<hifi::ByteArray>& dracoMeshes, const std::vector<std::vector<hifi::ByteArray>>& dracoMaterialLists) override;
 
 private:
-    void loadOBJ();
-    void createFBXNodeTree(FBXNode& rootNode, FBXGeometry& geometry);
-    void setMaterialNodeProperties(FBXNode& materialNode, QString material, FBXGeometry& geometry);
+    void createFBXNodeTree(FBXNode& rootNode, const hfm::Model::Pointer& hfmModel, const hifi::ByteArray& dracoMesh, const std::vector<hifi::ByteArray>& dracoMaterialList);
+    void setMaterialNodeProperties(FBXNode& materialNode, const QString& materialName, const hfm::Material& material, const hfm::Model::Pointer& hfmModel);
     NodeID nextNodeID() { return _nodeID++; }
-
 
     NodeID _nodeID { 0 };
     std::vector<NodeID> _materialIDs;
-    std::vector<std::pair<NodeID, int>> _mapTextureMaterial;
 };
 #endif // hifi_OBJBaker_h

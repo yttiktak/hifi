@@ -18,98 +18,37 @@
 
 #include <shared/ReadWriteLockable.h>
 #include <TransformNode.h>
+#include <PickFilter.h>
 
+/**jsdoc
+ * <p>The type of an intersection.</p>
+ * <table>
+ *   <thead>
+ *     <tr><th>Name</th><th>Value</th><th>Description</th></tr>
+ *   </thead>
+ *   <tbody>
+ *     <tr><td>INTERSECTED_NONE</td><td><code>0</code></td><td>Intersected nothing.</td></tr>
+ *     <tr><td>INTERSECTED_ENTITY</td><td><code>1</code></td><td>Intersected an entity.</td></tr>
+ *     <tr><td>INTERSECTED_LOCAL_ENTITY</td><td><code>2</code></td><td>Intersected a local entity.</td></tr>
+ *     <tr><td>INTERSECTED_AVATAR</td><td><code>3</code></td><td>Intersected an avatar.</td></tr>
+ *     <tr><td>INTERSECTED_HUD</td><td><code>4</code></td><td>Intersected the HUD surface.</td></tr>
+ *   </tbody>
+ * </table>
+ * @typedef {number} IntersectionType
+ */
 enum IntersectionType {
     NONE = 0,
     ENTITY,
-    OVERLAY,
+    LOCAL_ENTITY,
     AVATAR,
     HUD
-};
-
-class PickFilter {
-public:
-    enum FlagBit {
-        PICK_ENTITIES = 0,
-        PICK_OVERLAYS,
-        PICK_AVATARS,
-        PICK_HUD,
-
-        PICK_COARSE, // if not set, does precise intersection, otherwise, doesn't
-
-        PICK_INCLUDE_INVISIBLE, // if not set, will not intersect invisible elements, otherwise, intersects both visible and invisible elements
-        PICK_INCLUDE_NONCOLLIDABLE, // if not set, will not intersect noncollidable elements, otherwise, intersects both collidable and noncollidable elements
-
-        // NOT YET IMPLEMENTED
-        PICK_ALL_INTERSECTIONS, // if not set, returns closest intersection, otherwise, returns list of all intersections
-
-        NUM_FLAGS, // Not a valid flag
-    };
-    typedef std::bitset<NUM_FLAGS> Flags;
-
-    // The key is the Flags
-    Flags _flags;
-
-    PickFilter() {}
-    PickFilter(const Flags& flags) : _flags(flags) {}
-
-    bool operator== (const PickFilter& rhs) const { return _flags == rhs._flags; }
-    bool operator!= (const PickFilter& rhs) const { return _flags != rhs._flags; }
-
-    void setFlag(FlagBit flag, bool value) { _flags[flag] = value; }
-
-    bool doesPickNothing() const { return _flags == NOTHING._flags; }
-    bool doesPickEntities() const { return _flags[PICK_ENTITIES]; }
-    bool doesPickOverlays() const { return _flags[PICK_OVERLAYS]; }
-    bool doesPickAvatars() const { return _flags[PICK_AVATARS]; }
-    bool doesPickHUD() const { return _flags[PICK_HUD]; }
-
-    bool doesPickCoarse() const { return _flags[PICK_COARSE]; }
-    bool doesPickInvisible() const { return _flags[PICK_INCLUDE_INVISIBLE]; }
-    bool doesPickNonCollidable() const { return _flags[PICK_INCLUDE_NONCOLLIDABLE]; }
-
-    bool doesWantAllIntersections() const { return _flags[PICK_ALL_INTERSECTIONS]; }
-
-    // Helpers for RayPickManager
-    Flags getEntityFlags() const {
-        unsigned int toReturn = getBitMask(PICK_ENTITIES);
-        if (doesPickInvisible()) {
-            toReturn |= getBitMask(PICK_INCLUDE_INVISIBLE);
-        }
-        if (doesPickNonCollidable()) {
-            toReturn |= getBitMask(PICK_INCLUDE_NONCOLLIDABLE);
-        }
-        if (doesPickCoarse()) {
-            toReturn |= getBitMask(PICK_COARSE);
-        }
-        return Flags(toReturn);
-    }
-    Flags getOverlayFlags() const {
-        unsigned int toReturn = getBitMask(PICK_OVERLAYS);
-        if (doesPickInvisible()) {
-            toReturn |= getBitMask(PICK_INCLUDE_INVISIBLE);
-        }
-        if (doesPickNonCollidable()) {
-            toReturn |= getBitMask(PICK_INCLUDE_NONCOLLIDABLE);
-        }
-        if (doesPickCoarse()) {
-            toReturn |= getBitMask(PICK_COARSE);
-        }
-        return Flags(toReturn);
-    }
-    Flags getAvatarFlags() const { return Flags(getBitMask(PICK_AVATARS)); }
-    Flags getHUDFlags() const { return Flags(getBitMask(PICK_HUD)); }
-
-    static constexpr unsigned int getBitMask(FlagBit bit) { return 1 << bit; }
-
-    static const PickFilter NOTHING;
 };
 
 class PickResult {
 public:
     PickResult() {}
     PickResult(const QVariantMap& pickVariant) : pickVariant(pickVariant) {}
-    virtual ~PickResult() {}
+    virtual ~PickResult() = default;
 
     virtual QVariantMap toVariantMap() const {
         return pickVariant;
@@ -135,29 +74,40 @@ class PickQuery : protected ReadWriteLockable {
     Q_GADGET
 public:
     PickQuery(const PickFilter& filter, const float maxDistance, const bool enabled);
+    virtual ~PickQuery() = default;
 
     /**jsdoc
-     * Enum for different types of Picks and Pointers.
+     * The <code>PickType</code> API provides constant numeric values that represent different types of picks.
      *
      * @namespace PickType
      * @variation 0
      *
      * @hifi-interface
      * @hifi-client-entity
+     * @hifi-avatar
      *
-     * @property {number} Ray Ray Picks intersect a ray with the nearest object in front of them, along a given direction.
-     * @property {number} Stylus Stylus Picks provide "tapping" functionality on/into flat surfaces.
-     * @property {number} Parabola Parabola Picks intersect a parabola with the nearest object in front of them, with a given initial velocity and acceleration.
+     * @property {number} Ray - Ray picks intersect a ray with objects in front of them, along their direction.
+     * @property {number} Parabola - Parabola picks intersect a parabola with objects in front of them, along their arc.
+     * @property {number} Stylus - Stylus picks provide "tapping" functionality on or into flat surfaces.
+     * @property {number} Collision - Collision picks intersect a collision volume with avatars and entities that have 
+     *     collisions.
      */
+
     /**jsdoc
+     * <p>A type of pick.</p>
      * <table>
      *   <thead>
      *     <tr><th>Value</th><th>Description</th></tr>
      *   </thead>
      *   <tbody>
-     *     <tr><td><code>{@link PickType(0)|PickType.Ray}</code></td><td></td></tr>
-     *     <tr><td><code>{@link PickType(0)|PickType.Stylus}</code></td><td></td></tr>
-     *     <tr><td><code>{@link PickType(0)|PickType.Parabola}</code></td><td></td></tr>
+     *     <tr><td><code>{@link PickType(0)|PickType.Ray}</code></td><td>Ray picks intersect a ray with objects in front of 
+     *       them, along their direction.</td></tr>
+     *     <tr><td><code>{@link PickType(0)|PickType.Parabola}</code></td><td>Parabola picks intersect a parabola with objects
+     *       in front of them, along their arc.</td></tr>
+     *     <tr><td><code>{@link PickType(0)|PickType.Stylus}</code></td><td>Stylus picks provide "tapping" functionality on or
+     *       into flat surfaces.</td></tr>
+     *     <tr><td><code>{@link PickType(0)|PickType.Collision}</code></td><td>Collision picks intersect a collision volume 
+     *       with avatars and entities that have collisions.</td></tr>
      *   </tbody>
      * </table>
      * @typedef {number} PickType
@@ -167,7 +117,8 @@ public:
         Stylus,
         Parabola,
         Collision,
-        NUM_PICK_TYPES
+        NUM_PICK_TYPES,
+        INVALID_PICK_TYPE = -1
     };
     Q_ENUM(PickType)
 
@@ -184,6 +135,7 @@ public:
     PickFilter getFilter() const;
     float getMaxDistance() const;
     bool isEnabled() const;
+    virtual PickType getType() const = 0;
 
     void setPrecisionPicking(bool precisionPicking);
 
@@ -218,6 +170,27 @@ public:
     void setIgnoreItems(const QVector<QUuid>& items);
     void setIncludeItems(const QVector<QUuid>& items);
 
+    virtual QVariantMap toVariantMap() const {
+        QVariantMap properties;
+
+        properties["pickType"] = (int)getType();
+        properties["enabled"] = isEnabled();
+        properties["filter"] = (unsigned int)getFilter()._flags.to_ulong();
+        properties["maxDistance"] = getMaxDistance();
+
+        if (parentTransform) {
+            auto transformNodeProperties = parentTransform->toVariantMap();
+            for (auto it = transformNodeProperties.cbegin(); it != transformNodeProperties.cend(); ++it) {
+                properties[it.key()] = it.value();
+            }
+        }
+
+        return properties;
+    }
+
+    void setScriptParameters(const QVariantMap& parameters);
+    QVariantMap getScriptParameters() const;
+
     virtual bool isLeftHand() const { return _jointState == JOINT_STATE_LEFT_HAND; }
     virtual bool isRightHand() const { return _jointState == JOINT_STATE_RIGHT_HAND; }
     virtual bool isMouse() const { return _jointState == JOINT_STATE_MOUSE; }
@@ -237,6 +210,9 @@ private:
     QVector<QUuid> _ignoreItems;
     QVector<QUuid> _includeItems;
 
+    // The parameters used to create this pick when created through a script
+    QVariantMap _scriptParameters;
+
     JointState _jointState { JOINT_STATE_NONE };
 };
 Q_DECLARE_METATYPE(PickQuery::PickType)
@@ -245,15 +221,24 @@ template<typename T>
 class Pick : public PickQuery {
 public:
     Pick(const T& mathPick, const PickFilter& filter, const float maxDistance, const bool enabled) : PickQuery(filter, maxDistance, enabled), _mathPick(mathPick) {}
-    virtual ~Pick() {}
 
     virtual T getMathematicalPick() const = 0;
     virtual PickResultPointer getDefaultResult(const QVariantMap& pickVariant) const = 0;
     virtual PickResultPointer getEntityIntersection(const T& pick) = 0;
-    virtual PickResultPointer getOverlayIntersection(const T& pick) = 0;
     virtual PickResultPointer getAvatarIntersection(const T& pick) = 0;
     virtual PickResultPointer getHUDIntersection(const T& pick) = 0;
 
+    QVariantMap toVariantMap() const override {
+        QVariantMap properties = PickQuery::toVariantMap();
+
+        const QVariantMap mathPickProperties = _mathPick.toVariantMap();
+        for (auto it = mathPickProperties.cbegin(); it != mathPickProperties.cend(); ++it) {
+            properties[it.key()] = it.value();
+        }
+
+        return properties;
+    }
+    
 protected:
     T _mathPick;
 };

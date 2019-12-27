@@ -15,6 +15,7 @@
 
 #include <GLMHelpers.h>
 
+#include <SettingHandle.h>
 #include <controllers/InputDevice.h>
 #include <plugins/InputPlugin.h>
 
@@ -28,7 +29,11 @@ public:
     const QString getName() const override { return NAME; }
     bool isHandController() const override { return _touch != nullptr; }
     bool isHeadController() const override { return true; }
+    bool configurable() override { return true; }
+    QString configurationLayout() override;
     QStringList getSubdeviceNames() override;
+    void setConfigurationSettings(const QJsonObject configurationSetting) override;
+    QJsonObject configurationSettings() override;
 
     bool activate() override;
     void deactivate() override;
@@ -103,6 +108,7 @@ private:
 
     void checkForConnectedDevices();
 
+    Setting::Handle<bool> _trackControllersInOculusHome { "trackControllersInOculusHome", false };
     ovrInputState _remoteInputState {};
     ovrInputState _touchInputState {};
     RemoteDevice::Pointer _remote;

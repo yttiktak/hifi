@@ -36,8 +36,30 @@ void Pointer::disable() {
     DependencyManager::get<PickManager>()->disablePick(_pickUID);
 }
 
+bool Pointer::isEnabled() {
+    return _enabled;
+}
+
 PickResultPointer Pointer::getPrevPickResult() {
     return DependencyManager::get<PickManager>()->getPrevPickResult(_pickUID);
+}
+
+QVariantMap Pointer::toVariantMap() const {
+    QVariantMap qVariantMap = DependencyManager::get<PickManager>()->getPickProperties(_pickUID);
+
+    qVariantMap["pointerType"] = getType();
+    qVariantMap["pickID"] = _pickUID;
+    qVariantMap["hover"] = _hover;
+
+    return qVariantMap;
+}
+
+void Pointer::setScriptParameters(const QVariantMap& scriptParameters) {
+    _scriptParameters = scriptParameters;
+}
+
+QVariantMap Pointer::getScriptParameters() const {
+    return _scriptParameters;
 }
 
 void Pointer::setPrecisionPicking(bool precisionPicking) {
@@ -109,14 +131,14 @@ void Pointer::generatePointerEvents(unsigned int pointerID, const PickResultPoin
     if (_enabled && _hover && doHover && !_prevDoHover) {
         if (hoveredObject.type == ENTITY) {
             emit pointerManager->hoverBeginEntity(hoveredObject.objectID, hoveredEvent);
-        } else if (hoveredObject.type == OVERLAY) {
+        } else if (hoveredObject.type == LOCAL_ENTITY) {
             emit pointerManager->hoverBeginOverlay(hoveredObject.objectID, hoveredEvent);
         } else if (hoveredObject.type == HUD) {
             emit pointerManager->hoverBeginHUD(hoveredEvent);
         }
     } else if (_enabled && _hover && doHover) {
-        if (hoveredObject.type == OVERLAY) {
-            if (_prevHoveredObject.type == OVERLAY) {
+        if (hoveredObject.type == LOCAL_ENTITY) {
+            if (_prevHoveredObject.type == LOCAL_ENTITY) {
                 if (hoveredObject.objectID == _prevHoveredObject.objectID) {
                     emit pointerManager->hoverContinueOverlay(hoveredObject.objectID, hoveredEvent);
                 } else {
@@ -150,7 +172,7 @@ void Pointer::generatePointerEvents(unsigned int pointerID, const PickResultPoin
                 }
             } else {
                 emit pointerManager->hoverBeginEntity(hoveredObject.objectID, hoveredEvent);
-                if (_prevHoveredObject.type == OVERLAY) {
+                if (_prevHoveredObject.type == LOCAL_ENTITY) {
                     emit pointerManager->hoverEndOverlay(_prevHoveredObject.objectID, hoveredEvent);
                 } else if (_prevHoveredObject.type == HUD) {
                     emit pointerManager->hoverEndHUD(hoveredEvent);
@@ -166,7 +188,7 @@ void Pointer::generatePointerEvents(unsigned int pointerID, const PickResultPoin
                 emit pointerManager->hoverBeginHUD(hoveredEvent);
                 if (_prevHoveredObject.type == ENTITY) {
                     emit pointerManager->hoverEndEntity(_prevHoveredObject.objectID, hoveredEvent);
-                } else if (_prevHoveredObject.type == OVERLAY) {
+                } else if (_prevHoveredObject.type == LOCAL_ENTITY) {
                     emit pointerManager->hoverEndOverlay(_prevHoveredObject.objectID, hoveredEvent);
                 }
             }
@@ -175,7 +197,7 @@ void Pointer::generatePointerEvents(unsigned int pointerID, const PickResultPoin
         if (hoveredObject.type == NONE) {
             if (_prevHoveredObject.type == ENTITY) {
                 emit pointerManager->hoverEndEntity(_prevHoveredObject.objectID, hoveredEvent);
-            } else if (_prevHoveredObject.type == OVERLAY) {
+            } else if (_prevHoveredObject.type == LOCAL_ENTITY) {
                 emit pointerManager->hoverEndOverlay(_prevHoveredObject.objectID, hoveredEvent);
             } else if (_prevHoveredObject.type == HUD) {
                 emit pointerManager->hoverEndHUD(hoveredEvent);
@@ -191,7 +213,7 @@ void Pointer::generatePointerEvents(unsigned int pointerID, const PickResultPoin
         hoveredEvent.setShouldFocus(button == SHOULD_FOCUS_BUTTON);
         if (hoveredObject.type == ENTITY) {
             emit pointerManager->triggerBeginEntity(hoveredObject.objectID, hoveredEvent);
-        } else if (hoveredObject.type == OVERLAY) {
+        } else if (hoveredObject.type == LOCAL_ENTITY) {
             emit pointerManager->triggerBeginOverlay(hoveredObject.objectID, hoveredEvent);
         } else if (hoveredObject.type == HUD) {
             emit pointerManager->triggerBeginHUD(hoveredEvent);
@@ -207,7 +229,7 @@ void Pointer::generatePointerEvents(unsigned int pointerID, const PickResultPoin
         triggeredEvent.setButton(chooseButton(button));
         if (_triggeredObjects[button].type == ENTITY) {
             emit pointerManager->triggerContinueEntity(_triggeredObjects[button].objectID, triggeredEvent);
-        } else if (_triggeredObjects[button].type == OVERLAY) {
+        } else if (_triggeredObjects[button].type == LOCAL_ENTITY) {
             emit pointerManager->triggerContinueOverlay(_triggeredObjects[button].objectID, triggeredEvent);
         } else if (_triggeredObjects[button].type == HUD) {
             emit pointerManager->triggerContinueHUD(triggeredEvent);
@@ -222,7 +244,7 @@ void Pointer::generatePointerEvents(unsigned int pointerID, const PickResultPoin
         triggeredEvent.setButton(chooseButton(button));
         if (_triggeredObjects[button].type == ENTITY) {
             emit pointerManager->triggerEndEntity(_triggeredObjects[button].objectID, triggeredEvent);
-        } else if (_triggeredObjects[button].type == OVERLAY) {
+        } else if (_triggeredObjects[button].type == LOCAL_ENTITY) {
             emit pointerManager->triggerEndOverlay(_triggeredObjects[button].objectID, triggeredEvent);
         } else if (_triggeredObjects[button].type == HUD) {
             emit pointerManager->triggerEndHUD(triggeredEvent);
@@ -234,7 +256,7 @@ void Pointer::generatePointerEvents(unsigned int pointerID, const PickResultPoin
     if (_hover && ((!_enabled && _prevEnabled) || (!doHover && _prevDoHover))) {
         if (_prevHoveredObject.type == ENTITY) {
             emit pointerManager->hoverEndEntity(_prevHoveredObject.objectID, hoveredEvent);
-        } else if (_prevHoveredObject.type == OVERLAY) {
+        } else if (_prevHoveredObject.type == LOCAL_ENTITY) {
             emit pointerManager->hoverEndOverlay(_prevHoveredObject.objectID, hoveredEvent);
         } else if (_prevHoveredObject.type == HUD) {
             emit pointerManager->hoverEndHUD(hoveredEvent);

@@ -32,15 +32,6 @@ LogHandler& LogHandler::getInstance() {
     return staticInstance;
 }
 
-LogHandler::LogHandler() {
-    // make sure we setup the repeated message flusher, but do it on the LogHandler thread	
-    QMetaObject::invokeMethod(this, "setupRepeatedMessageFlusher");
-}
-
-LogHandler::~LogHandler() {
-    flushRepeatedMessages();
-}
-
 const char* stringForLogType(LogMsgType msgType) {
     switch (msgType) {
         case LogInfo:

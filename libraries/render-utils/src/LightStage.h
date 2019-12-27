@@ -74,12 +74,15 @@ public:
                                      float left, float right, float bottom, float top, float viewMaxShadowDistance) const;
         };
 
-        Shadow(graphics::LightPointer light, float maxDistance, unsigned int cascadeCount = 1);
+        Shadow(graphics::LightPointer light, unsigned int cascadeCount = 1);
+
+        void setLight(graphics::LightPointer light);
 
         void setKeylightFrustum(const ViewFrustum& viewFrustum,
                                 float nearDepth = 1.0f, float farDepth = 1000.0f);
         void setKeylightCascadeFrustum(unsigned int cascadeIndex, const ViewFrustum& viewFrustum,
-                                float nearDepth = 1.0f, float farDepth = 1000.0f, float fixedBias = 0.005f, float slopeBias = 0.005f);
+                                float nearDepth = 1.0f, float farDepth = 1000.0f);
+        void setKeylightCascadeBias(unsigned int cascadeIndex, float constantBias, float slopeBias);
         void setCascadeFrustum(unsigned int cascadeIndex, const ViewFrustum& shadowFrustum);
 
         const UniformBufferView& getBuffer() const { return _schemaBuffer; }
@@ -93,37 +96,32 @@ public:
         const graphics::LightPointer& getLight() const { return _light; }
 
         gpu::TexturePointer map;
-
-    protected:
-
 #include "Shadows_shared.slh"
-
-        using Cascades = std::vector<Cascade>;
-
-        static const glm::mat4 _biasMatrix;
-
-        graphics::LightPointer _light;
-        float _maxDistance;
-        Cascades _cascades;
-
         class Schema : public ShadowParameters {
         public:
 
             Schema();
 
         };
+    protected:
+
+        using Cascades = std::vector<Cascade>;
+
+        static const glm::mat4 _biasMatrix;
+
+        graphics::LightPointer _light;
+        float _maxDistance{ 0.0f };
+        Cascades _cascades;
+
         UniformBufferView _schemaBuffer = nullptr;
     };
 
     using ShadowPointer = std::shared_ptr<Shadow>;
-    using Shadows = render::indexed_container::IndexedPointerVector<Shadow>;
 
     Index findLight(const LightPointer& light) const;
     Index addLight(const LightPointer& light, const bool shouldSetAsDefault = false);
     
     Index getDefaultLight() { return _defaultLightId; }
-
-    Index addShadow(Index lightIndex, float maxDistance = 20.0f, unsigned int cascadeCount = 1U);
 
     LightPointer removeLight(Index index);
     
@@ -133,28 +131,7 @@ public:
     Index getNumFreeLights() const { return _lights.getNumFreeIndices(); }
     Index getNumAllocatedLights() const { return _lights.getNumAllocatedIndices(); }
 
-    LightPointer getLight(Index lightId) const {
-        return _lights.get(lightId);
-    }
-
-    Index getShadowId(Index lightId) const;
-
-    ShadowPointer getShadow(Index lightId) const {
-        return _shadows.get(getShadowId(lightId));
-    }
-
-    using LightAndShadow = std::pair<LightPointer, ShadowPointer>;
-    LightAndShadow getLightAndShadow(Index lightId) const {
-        auto light = getLight(lightId);
-        auto shadow = getShadow(lightId);
-        assert(shadow == nullptr || shadow->getLight() == light);
-        return LightAndShadow(light, shadow);
-    }
-
-    LightPointer getCurrentKeyLight() const;
-    LightPointer getCurrentAmbientLight() const;
-    ShadowPointer getCurrentKeyShadow() const;
-    LightAndShadow getCurrentKeyLightAndShadow() const;
+    LightPointer getLight(Index lightId) const { return _lights.get(lightId); }
 
     LightStage();
 
@@ -185,13 +162,35 @@ public:
         LightStage::LightIndices _sunLights;
         LightStage::LightIndices _ambientLights;
     };
+    using FramePointer = std::shared_ptr<Frame>;
     
+    class ShadowFrame {
+    public:
+        ShadowFrame() {}
+        
+        void clear() {}
+        
+        using Object = ShadowPointer;
+        using Objects = std::vector<Object>;
+
+        void pushShadow(const ShadowPointer& shadow) {
+            _objects.emplace_back(shadow);
+        }
+
+
+        Objects _objects;
+    };
+    using ShadowFramePointer = std::shared_ptr<ShadowFrame>;
+
     Frame _currentFrame;
     
     Index getAmbientOffLight() { return _ambientOffLightId; }
     Index getPointOffLight() { return _pointOffLightId; }
     Index getSpotOffLight() { return _spotOffLightId; }
     Index getSunOffLight() { return _sunOffLightId; }
+
+    LightPointer getCurrentKeyLight(const LightStage::Frame& frame) const;
+    LightPointer getCurrentAmbientLight(const LightStage::Frame& frame) const;
 
 protected:
 
@@ -203,7 +202,6 @@ protected:
     gpu::BufferPointer _lightArrayBuffer;
 
     Lights _lights;
-    Shadows _shadows;
     Descs _descs;
     LightMap _lightMap;
 

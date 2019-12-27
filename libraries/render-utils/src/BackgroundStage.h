@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <render/IndexedContainer.h>
 #include <render/Stage.h>
+#include "HazeStage.h"
 
 #include "LightingModel.h"
 
@@ -65,6 +66,7 @@ public:
 
         BackgroundStage::BackgroundIndices _backgrounds;
     };
+    using FramePointer = std::shared_ptr<Frame>;
     
     Frame _currentFrame;
 };
@@ -76,18 +78,16 @@ public:
 
     BackgroundStageSetup();
     void run(const render::RenderContextPointer& renderContext);
-
-protected:
 };
 
 class DrawBackgroundStage {
 public:
-    using Inputs = LightingModelPointer;
+    using Inputs = render::VaryingSet3<LightingModelPointer, BackgroundStage::FramePointer, HazeStage::FramePointer>;
     using JobModel = render::Job::ModelI<DrawBackgroundStage, Inputs>;
 
-    void run(const render::RenderContextPointer& renderContext, const Inputs& inputs);
+    DrawBackgroundStage() {}
 
-protected:
+    void run(const render::RenderContextPointer& renderContext, const Inputs& inputs);
 };
 
 #endif

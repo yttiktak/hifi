@@ -114,6 +114,7 @@ SendQueue& Connection::getSendQueue() {
         QObject::connect(_sendQueue.get(), &SendQueue::packetRetransmitted, this, &Connection::recordRetransmission);
         QObject::connect(_sendQueue.get(), &SendQueue::queueInactive, this, &Connection::queueInactive);
         QObject::connect(_sendQueue.get(), &SendQueue::timeout, this, &Connection::queueTimeout);
+        QObject::connect(this, &Connection::destinationAddressChange, _sendQueue.get(), &SendQueue::updateDestinationAddress);
 
         
         // set defaults on the send queue from our congestion control object and estimatedTimeout()
@@ -192,10 +193,19 @@ void Connection::recordSentPackets(int wireSize, int payloadSize,
     _congestionControl->onPacketSent(wireSize, seqNum, timePoint);
 }
 
-void Connection::recordRetransmission(int wireSize, SequenceNumber seqNum, p_high_resolution_clock::time_point timePoint) {
-    _stats.record(ConnectionStats::Stats::Retransmission);
+void Connection::recordRetransmission(int wireSize, int payloadSize,
+                                      SequenceNumber seqNum, p_high_resolution_clock::time_point timePoint) {
+    _stats.recordRetransmittedPackets(payloadSize, wireSize);
 
-    _congestionControl->onPacketSent(wireSize, seqNum, timePoint);
+    _congestionControl->onPacketReSent(wireSize, seqNum, timePoint);
+}
+
+void Connection::recordSentUnreliablePackets(int wireSize, int payloadSize) {
+    _stats.recordUnreliableSentPackets(payloadSize, wireSize);
+}
+
+void Connection::recordReceivedUnreliablePackets(int wireSize, int payloadSize) {
+    _stats.recordUnreliableReceivedPackets(payloadSize, wireSize);
 }
 
 void Connection::sendACK() {
@@ -212,7 +222,7 @@ void Connection::sendACK() {
     // have the socket send off our packet
     _parentSocket->writeBasePacket(*_ackPacket, _destination);
     
-    _stats.record(ConnectionStats::Stats::SentACK);
+    _stats.recordSentACK(_ackPacket->getWireSize());
 }
 
 SequenceNumber Connection::nextACK() const {
@@ -259,7 +269,7 @@ bool Connection::processReceivedSequenceNumber(SequenceNumber sequenceNumber, in
     bool wasDuplicate = false;
     
     if (sequenceNumber > _lastReceivedSequenceNumber) {
-        // Update largest recieved sequence number
+        // Update largest received sequence number
         _lastReceivedSequenceNumber = sequenceNumber;
     } else {
         // Otherwise, it could be a resend, try and remove it from the loss list
@@ -270,7 +280,7 @@ bool Connection::processReceivedSequenceNumber(SequenceNumber sequenceNumber, in
     sendACK();
     
     if (wasDuplicate) {
-        _stats.record(ConnectionStats::Stats::Duplicate);
+        _stats.recordDuplicatePackets(payloadSize, packetSize);
     } else {
         _stats.recordReceivedPackets(payloadSize, packetSize);
     }
@@ -302,9 +312,7 @@ void Connection::processControl(ControlPacketPointer controlPacket) {
                 // We're already in a state where we've received a handshake ack, so we are likely in a state
                 // where the other end expired our connection. Let's reset.
 
-#ifdef UDT_CONNECTION_DEBUG
-                qCDebug(networking) << "Got  HandshakeRequest from" << _destination << ", stopping SendQueue";
-#endif
+                qCDebug(networking) << "Got HandshakeRequest from" << _destination << "while active, stopping SendQueue";
                 _hasReceivedHandshakeACK = false;
                 stopSendQueue();
             }
@@ -318,28 +326,28 @@ void Connection::processACK(ControlPacketPointer controlPacket) {
     controlPacket->readPrimitive(&ack);
     
     // update the total count of received ACKs
-    _stats.record(ConnectionStats::Stats::ReceivedACK);
+    _stats.recordReceivedACK(controlPacket->getWireSize());
     
     // validate that this isn't a BS ACK
     if (ack > getSendQueue().getCurrentSequenceNumber()) {
         // in UDT they specifically break the connection here - do we want to do anything?
-        Q_ASSERT_X(false, "Connection::processACK", "ACK recieved higher than largest sent sequence number");
+        Q_ASSERT_X(false, "Connection::processACK", "ACK received higher than largest sent sequence number");
         return;
     }
     
-    if (ack <= _lastReceivedACK) {
+    if (ack < _lastReceivedACK) {
         // this is an out of order ACK, bail
-        // or
-        // processing an already received ACK, bail
         return;
     }
-    
-    _lastReceivedACK = ack;
-    
-    // ACK the send queue so it knows what was received
-    getSendQueue().ack(ack);
 
-    
+    if (ack > _lastReceivedACK) {
+        // this is not a repeated ACK, so update our member and tell the send queue
+        _lastReceivedACK = ack;
+
+        // ACK the send queue so it knows what was received
+        getSendQueue().ack(ack);
+    }
+
     // give this ACK to the congestion control and update the send queue parameters
     updateCongestionControlAndSendQueue([this, ack, &controlPacket] {
         if (_congestionControl->onACK(ack, controlPacket->getReceiveTime())) {
@@ -475,4 +483,11 @@ std::unique_ptr<Packet> PendingReceivedMessage::removeNextPacket() {
         return p;
     }
     return std::unique_ptr<Packet>();
+}
+
+void Connection::setDestinationAddress(const HifiSockAddr& destination) {
+    if (_destination != destination) {
+        _destination = destination;
+        emit destinationAddressChange(destination);
+    }
 }

@@ -22,6 +22,12 @@ class AnimStats : public QQuickItem {
     Q_PROPERTY(QString positionText READ positionText NOTIFY positionTextChanged)
     Q_PROPERTY(QString rotationText READ rotationText NOTIFY rotationTextChanged)
     Q_PROPERTY(QString velocityText READ velocityText NOTIFY velocityTextChanged)
+    Q_PROPERTY(QString recenterText READ recenterText NOTIFY recenterTextChanged)
+    Q_PROPERTY(QString sittingText READ sittingText NOTIFY sittingTextChanged)
+    Q_PROPERTY(QString walkingText READ walkingText NOTIFY walkingTextChanged)
+    Q_PROPERTY(QString overrideJointText READ overrideJointText NOTIFY overrideJointTextChanged)
+    Q_PROPERTY(QString flowText READ flowText NOTIFY flowTextChanged)
+    Q_PROPERTY(QString networkGraphText READ networkGraphText NOTIFY networkGraphTextChanged)
 
 public:
     static AnimStats* getInstance();
@@ -37,6 +43,12 @@ public:
     QString positionText() const { return _positionText; }
     QString rotationText() const { return _rotationText; }
     QString velocityText() const { return _velocityText; }
+    QString recenterText() const { return _recenterText; }
+    QString sittingText() const { return _sittingText; }
+    QString walkingText() const { return _walkingText; }
+    QString overrideJointText() const { return _overrideJointText; }
+    QString flowText() const { return _flowText; }
+    QString networkGraphText() const { return _networkGraphText; }
 
 public slots:
     void forceUpdateStats() { updateStats(true); }
@@ -49,6 +61,12 @@ signals:
     void positionTextChanged();
     void rotationTextChanged();
     void velocityTextChanged();
+    void recenterTextChanged();
+    void sittingTextChanged();
+    void walkingTextChanged();
+    void overrideJointTextChanged();
+    void flowTextChanged();
+    void networkGraphTextChanged();
 
 private:
     QStringList _animAlphaValues;
@@ -64,6 +82,12 @@ private:
     QString _positionText;
     QString _rotationText;
     QString _velocityText;
+    QString _recenterText;
+    QString _sittingText;
+    QString _walkingText;
+    QString _overrideJointText;
+    QString _flowText;
+    QString _networkGraphText;
 };
 
 #endif // hifi_AnimStats_h

@@ -11,16 +11,18 @@
 #ifndef hifi_model_Material_h
 #define hifi_model_Material_h
 
-#include <QMutex>
-
+#include <mutex>
 #include <bitset>
 #include <map>
+#include <unordered_map>
 #include <queue>
 
 #include <ColorUtils.h>
 
 #include <gpu/Resource.h>
 #include <gpu/TextureTable.h>
+
+#include "MaterialMappingMode.h"
 
 class Transform;
 
@@ -41,6 +43,8 @@ public:
         OPACITY_VAL_BIT,
         OPACITY_MASK_MAP_BIT,           // Opacity Map and Opacity MASK map are mutually exclusive
         OPACITY_TRANSLUCENT_MAP_BIT,
+        OPACITY_MAP_MODE_BIT,           // Opacity map mode bit is set if the value has set explicitely and not deduced from the textures assigned 
+        OPACITY_CUTOFF_VAL_BIT,
         SCATTERING_VAL_BIT,
 
         // THe map bits must be in the same sequence as the enum names for the map channels
@@ -50,7 +54,7 @@ public:
         ROUGHNESS_MAP_BIT,
         NORMAL_MAP_BIT,
         OCCLUSION_MAP_BIT,
-        LIGHTMAP_MAP_BIT,
+        LIGHT_MAP_BIT,
         SCATTERING_MAP_BIT,
 
         NUM_FLAGS,
@@ -64,11 +68,30 @@ public:
         ROUGHNESS_MAP,
         NORMAL_MAP,
         OCCLUSION_MAP,
-        LIGHTMAP_MAP,
+        LIGHT_MAP,
         SCATTERING_MAP,
 
         NUM_MAP_CHANNELS,
     };
+
+    enum OpacityMapMode {
+        OPACITY_MAP_OPAQUE = 0,
+        OPACITY_MAP_MASK,
+        OPACITY_MAP_BLEND,
+    };
+    static std::string getOpacityMapModeName(OpacityMapMode mode);
+    // find the enum value from a string, return true if match found
+    static bool getOpacityMapModeFromName(const std::string& modeName, OpacityMapMode& mode);
+
+    enum CullFaceMode {
+        CULL_NONE = 0,
+        CULL_FRONT,
+        CULL_BACK,
+
+        NUM_CULL_FACE_MODES
+    };
+    static std::string getCullFaceModeName(CullFaceMode mode);
+    static bool getCullFaceModeFromName(const std::string& modeName, CullFaceMode& mode);
 
     // The signature is the Flags
     Flags _flags;
@@ -91,6 +114,27 @@ public:
         Builder& withGlossy() { _flags.set(GLOSSY_VAL_BIT); return (*this); }
 
         Builder& withTranslucentFactor() { _flags.set(OPACITY_VAL_BIT); return (*this); }
+        Builder& withTranslucentMap() { _flags.set(OPACITY_TRANSLUCENT_MAP_BIT); return (*this); }
+        Builder& withMaskMap() { _flags.set(OPACITY_MASK_MAP_BIT); return (*this); }
+        Builder& withOpacityMapMode(OpacityMapMode mode) {
+            switch (mode) {
+            case OPACITY_MAP_OPAQUE:
+                _flags.reset(OPACITY_TRANSLUCENT_MAP_BIT);
+                _flags.reset(OPACITY_MASK_MAP_BIT);
+                break;
+            case OPACITY_MAP_MASK:
+                _flags.reset(OPACITY_TRANSLUCENT_MAP_BIT);
+                _flags.set(OPACITY_MASK_MAP_BIT);
+                break;
+            case OPACITY_MAP_BLEND:
+                _flags.set(OPACITY_TRANSLUCENT_MAP_BIT);
+                _flags.reset(OPACITY_MASK_MAP_BIT);
+                break;
+            };
+            _flags.set(OPACITY_MAP_MODE_BIT); // Intentionally set the mode!
+            return (*this);
+        }
+        Builder& withOpacityCutoff() { _flags.set(OPACITY_CUTOFF_VAL_BIT); return (*this); }
 
         Builder& withScattering() { _flags.set(SCATTERING_VAL_BIT); return (*this); }
 
@@ -99,12 +143,9 @@ public:
         Builder& withMetallicMap() { _flags.set(METALLIC_MAP_BIT); return (*this); }
         Builder& withRoughnessMap() { _flags.set(ROUGHNESS_MAP_BIT); return (*this); }
 
-        Builder& withTranslucentMap() { _flags.set(OPACITY_TRANSLUCENT_MAP_BIT); return (*this); }
-        Builder& withMaskMap() { _flags.set(OPACITY_MASK_MAP_BIT); return (*this); }
-
         Builder& withNormalMap() { _flags.set(NORMAL_MAP_BIT); return (*this); }
         Builder& withOcclusionMap() { _flags.set(OCCLUSION_MAP_BIT); return (*this); }
-        Builder& withLightmapMap() { _flags.set(LIGHTMAP_MAP_BIT); return (*this); }
+        Builder& withLightMap() { _flags.set(LIGHT_MAP_BIT); return (*this); }
         Builder& withScatteringMap() { _flags.set(SCATTERING_MAP_BIT); return (*this); }
 
         // Convenient standard keys that we will keep on using all over the place
@@ -148,14 +189,17 @@ public:
     void setOpacityMaskMap(bool value) { _flags.set(OPACITY_MASK_MAP_BIT, value); }
     bool isOpacityMaskMap() const { return _flags[OPACITY_MASK_MAP_BIT]; }
 
+    void setOpacityCutoff(bool value) { _flags.set(OPACITY_CUTOFF_VAL_BIT, value); }
+    bool isOpacityCutoff() const { return _flags[OPACITY_CUTOFF_VAL_BIT]; }
+
     void setNormalMap(bool value) { _flags.set(NORMAL_MAP_BIT, value); }
     bool isNormalMap() const { return _flags[NORMAL_MAP_BIT]; }
 
     void setOcclusionMap(bool value) { _flags.set(OCCLUSION_MAP_BIT, value); }
     bool isOcclusionMap() const { return _flags[OCCLUSION_MAP_BIT]; }
 
-    void setLightmapMap(bool value) { _flags.set(LIGHTMAP_MAP_BIT, value); }
-    bool isLightmapMap() const { return _flags[LIGHTMAP_MAP_BIT]; }
+    void setLightMap(bool value) { _flags.set(LIGHT_MAP_BIT, value); }
+    bool isLightMap() const { return _flags[LIGHT_MAP_BIT]; }
 
     void setScattering(bool value) { _flags.set(SCATTERING_VAL_BIT, value); }
     bool isScattering() const { return _flags[SCATTERING_VAL_BIT]; }
@@ -168,12 +212,31 @@ public:
 
 
     // Translucency and Opacity Heuristics are combining several flags:
+    void setOpacityMapMode(OpacityMapMode mode) {
+        switch (mode) {
+        case OPACITY_MAP_OPAQUE:
+            _flags.reset(OPACITY_TRANSLUCENT_MAP_BIT);
+            _flags.reset(OPACITY_MASK_MAP_BIT);
+            break;
+        case OPACITY_MAP_MASK:
+            _flags.reset(OPACITY_TRANSLUCENT_MAP_BIT);
+            _flags.set(OPACITY_MASK_MAP_BIT);
+            break;
+        case OPACITY_MAP_BLEND:
+            _flags.set(OPACITY_TRANSLUCENT_MAP_BIT);
+            _flags.reset(OPACITY_MASK_MAP_BIT);
+            break;
+        };
+        _flags.set(OPACITY_MAP_MODE_BIT); // Intentionally set the mode!
+    }
+    bool isOpacityMapMode() const { return _flags[OPACITY_MAP_MODE_BIT]; }
+    OpacityMapMode getOpacityMapMode() const { return (isOpacityMaskMap() ? OPACITY_MAP_MASK : (isTranslucentMap() ? OPACITY_MAP_BLEND : OPACITY_MAP_OPAQUE)); }
+
     bool isTranslucent() const { return isTranslucentFactor() || isTranslucentMap(); }
     bool isOpaque() const { return !isTranslucent(); }
     bool isSurfaceOpaque() const { return isOpaque() && !isOpacityMaskMap(); }
     bool isTexelOpaque() const { return isOpaque() && isOpacityMaskMap(); }
 };
-
 
 class MaterialFilter {
 public:
@@ -227,14 +290,20 @@ public:
         Builder& withoutMaskMap()       { _value.reset(MaterialKey::OPACITY_MASK_MAP_BIT); _mask.set(MaterialKey::OPACITY_MASK_MAP_BIT); return (*this); }
         Builder& withMaskMap()        { _value.set(MaterialKey::OPACITY_MASK_MAP_BIT);  _mask.set(MaterialKey::OPACITY_MASK_MAP_BIT); return (*this); }
 
+        Builder& withoutOpacityMapMode() { _value.reset(MaterialKey::OPACITY_MAP_MODE_BIT); _mask.set(MaterialKey::OPACITY_MAP_MODE_BIT); return (*this); }
+        Builder& withOpacityMapMode() { _value.set(MaterialKey::OPACITY_MAP_MODE_BIT);  _mask.set(MaterialKey::OPACITY_MAP_MODE_BIT); return (*this); }
+
+        Builder& withoutOpacityCutoff() { _value.reset(MaterialKey::OPACITY_CUTOFF_VAL_BIT); _mask.set(MaterialKey::OPACITY_CUTOFF_VAL_BIT); return (*this); }
+        Builder& withOpacityCutoff() { _value.set(MaterialKey::OPACITY_CUTOFF_VAL_BIT);  _mask.set(MaterialKey::OPACITY_CUTOFF_VAL_BIT); return (*this); }
+
         Builder& withoutNormalMap()       { _value.reset(MaterialKey::NORMAL_MAP_BIT); _mask.set(MaterialKey::NORMAL_MAP_BIT); return (*this); }
         Builder& withNormalMap()        { _value.set(MaterialKey::NORMAL_MAP_BIT);  _mask.set(MaterialKey::NORMAL_MAP_BIT); return (*this); }
 
         Builder& withoutOcclusionMap()       { _value.reset(MaterialKey::OCCLUSION_MAP_BIT); _mask.set(MaterialKey::OCCLUSION_MAP_BIT); return (*this); }
         Builder& withOcclusionMap()        { _value.set(MaterialKey::OCCLUSION_MAP_BIT);  _mask.set(MaterialKey::OCCLUSION_MAP_BIT); return (*this); }
 
-        Builder& withoutLightmapMap()       { _value.reset(MaterialKey::LIGHTMAP_MAP_BIT); _mask.set(MaterialKey::LIGHTMAP_MAP_BIT); return (*this); }
-        Builder& withLightmapMap()        { _value.set(MaterialKey::LIGHTMAP_MAP_BIT);  _mask.set(MaterialKey::LIGHTMAP_MAP_BIT); return (*this); }
+        Builder& withoutLightMap()       { _value.reset(MaterialKey::LIGHT_MAP_BIT); _mask.set(MaterialKey::LIGHT_MAP_BIT); return (*this); }
+        Builder& withLightMap()        { _value.set(MaterialKey::LIGHT_MAP_BIT);  _mask.set(MaterialKey::LIGHT_MAP_BIT); return (*this); }
 
         Builder& withoutScattering()       { _value.reset(MaterialKey::SCATTERING_VAL_BIT); _mask.set(MaterialKey::SCATTERING_VAL_BIT); return (*this); }
         Builder& withScattering()        { _value.set(MaterialKey::SCATTERING_VAL_BIT);  _mask.set(MaterialKey::SCATTERING_VAL_BIT); return (*this); }
@@ -264,123 +333,133 @@ public:
 
 class Material {
 public:
-    typedef gpu::BufferView UniformBufferView;
-
-    typedef glm::vec3 Color;
-
-    // Texture Map Array Schema
-    static const int NUM_TEXCOORD_TRANSFORMS{ 2 };
-
     typedef MaterialKey::MapChannel MapChannel;
     typedef std::map<MapChannel, TextureMapPointer> TextureMaps;
-    typedef std::bitset<MaterialKey::NUM_MAP_CHANNELS> MapFlags;
 
     Material();
     Material(const Material& material);
+    virtual ~Material() = default;
     Material& operator= (const Material& material);
-    virtual ~Material();
 
     const MaterialKey& getKey() const { return _key; }
 
-    void setEmissive(const Color& emissive, bool isSRGB = true);
-    Color getEmissive(bool SRGB = true) const { return (SRGB ? ColorUtils::tosRGBVec3(_schemaBuffer.get<Schema>()._emissive) : _schemaBuffer.get<Schema>()._emissive); }
+    static const float DEFAULT_EMISSIVE;
+    void setEmissive(const glm::vec3& emissive, bool isSRGB = true);
+    glm::vec3 getEmissive(bool SRGB = true) const { return (SRGB ? ColorUtils::tosRGBVec3(_emissive) : _emissive); }
 
+    static const float DEFAULT_OPACITY;
     void setOpacity(float opacity);
-    float getOpacity() const { return _schemaBuffer.get<Schema>()._opacity; }
+    float getOpacity() const { return _opacity; }
+
+    static const MaterialKey::OpacityMapMode DEFAULT_OPACITY_MAP_MODE;
+    void setOpacityMapMode(MaterialKey::OpacityMapMode opacityMapMode);
+    MaterialKey::OpacityMapMode getOpacityMapMode() const;
+
+    static const float DEFAULT_OPACITY_CUTOFF;
+    void setOpacityCutoff(float opacityCutoff);
+    float getOpacityCutoff() const { return _opacityCutoff; }
+
+    static const MaterialKey::CullFaceMode DEFAULT_CULL_FACE_MODE;
+    void setCullFaceMode(MaterialKey::CullFaceMode cullFaceMode) { _cullFaceMode = cullFaceMode; }
+    MaterialKey::CullFaceMode getCullFaceMode() const { return _cullFaceMode; }
 
     void setUnlit(bool value);
     bool isUnlit() const { return _key.isUnlit(); }
 
-    void setAlbedo(const Color& albedo, bool isSRGB = true);
-    Color getAlbedo(bool SRGB = true) const { return (SRGB ? ColorUtils::tosRGBVec3(_schemaBuffer.get<Schema>()._albedo) : _schemaBuffer.get<Schema>()._albedo); }
+    static const float DEFAULT_ALBEDO;
+    void setAlbedo(const glm::vec3& albedo, bool isSRGB = true);
+    glm::vec3 getAlbedo(bool SRGB = true) const { return (SRGB ? ColorUtils::tosRGBVec3(_albedo) : _albedo); }
 
-    void setFresnel(const Color& fresnel, bool isSRGB = true);
-    Color getFresnel(bool SRGB = true) const { return (SRGB ? ColorUtils::tosRGBVec3(_schemaBuffer.get<Schema>()._fresnel) : _schemaBuffer.get<Schema>()._fresnel); }
-
+    static const float DEFAULT_METALLIC;
     void setMetallic(float metallic);
-    float getMetallic() const { return _schemaBuffer.get<Schema>()._metallic; }
+    float getMetallic() const { return _metallic; }
 
+    static const float DEFAULT_ROUGHNESS;
     void setRoughness(float roughness);
-    float getRoughness() const { return _schemaBuffer.get<Schema>()._roughness; }
+    float getRoughness() const { return _roughness; }
 
+    static const float DEFAULT_SCATTERING;
     void setScattering(float scattering);
-    float getScattering() const { return _schemaBuffer.get<Schema>()._scattering; }
-
-    // Schema to access the attribute values of the material
-    class Schema {
-    public:
-        glm::vec3 _emissive{ 0.0f }; // No Emissive
-        float _opacity{ 1.0f }; // Opacity = 1 => Not Transparent
-
-        glm::vec3 _albedo{ 0.5f }; // Grey albedo => isAlbedo
-        float _roughness{ 1.0f }; // Roughness = 1 => Not Glossy
-
-        glm::vec3 _fresnel{ 0.03f }; // Fresnel value for a default non metallic
-        float _metallic{ 0.0f }; // Not Metallic
-
-        float _scattering{ 0.0f }; // Scattering info
-
-        glm::vec2 _spare{ 0.0f };
-
-        uint32_t _key{ 0 }; // a copy of the materialKey
-
-        // for alignment beauty, Material size == Mat4x4
-
-        // Texture Coord Transform Array
-        glm::mat4 _texcoordTransforms[NUM_TEXCOORD_TRANSFORMS];
-
-        glm::vec4 _lightmapParams{ 0.0, 1.0, 0.0, 0.0 };
-
-        Schema() {}
-    };
-
-    const UniformBufferView& getSchemaBuffer() const { return _schemaBuffer; }
+    float getScattering() const { return _scattering; }
 
     // The texture map to channel association
+    static const int NUM_TEXCOORD_TRANSFORMS { 2 };
     void setTextureMap(MapChannel channel, const TextureMapPointer& textureMap);
     const TextureMaps& getTextureMaps() const { return _textureMaps; } // FIXME - not thread safe... 
     const TextureMapPointer getTextureMap(MapChannel channel) const;
 
     // Albedo maps cannot have opacity detected until they are loaded
     // This method allows const changing of the key/schemaBuffer without touching the map
-    void resetOpacityMap() const;
+    // return true if the opacity changed, flase otherwise
+    bool resetOpacityMap() const;
 
     // conversion from legacy material properties to PBR equivalent
     static float shininessToRoughness(float shininess) { return 1.0f - shininess / 100.0f; }
 
-    int getTextureCount() const { calculateMaterialInfo(); return _textureCount; }
-    size_t getTextureSize()  const { calculateMaterialInfo(); return _textureSize; }
-    bool hasTextureInfo() const { return _hasCalculatedTextureInfo; }
-
-    void setTextureTransforms(const Transform& transform);
+    void setTextureTransforms(const Transform& transform, MaterialMappingMode mode, bool repeat);
 
     const std::string& getName() const { return _name; }
+    void setName(const std::string& name) { _name = name; }
 
     const std::string& getModel() const { return _model; }
     void setModel(const std::string& model) { _model = model; }
 
-    const gpu::TextureTablePointer& getTextureTable() const { return _textureTable; }
+    glm::mat4 getTexCoordTransform(uint i) const { return _texcoordTransforms[i]; }
+    void setTexCoordTransform(uint i, const glm::mat4& mat4) { _texcoordTransforms[i] = mat4; }
+    glm::vec2 getLightmapParams() const { return _lightmapParams; }
+    glm::vec2 getMaterialParams() const { return _materialParams; }
+
+    bool getDefaultFallthrough() const { return _defaultFallthrough; }
+    void setDefaultFallthrough(bool defaultFallthrough) { _defaultFallthrough = defaultFallthrough; }
+
+    enum ExtraFlagBit {
+        TEXCOORDTRANSFORM0 = MaterialKey::NUM_FLAGS,
+        TEXCOORDTRANSFORM1,
+        LIGHTMAP_PARAMS,
+        MATERIAL_PARAMS,
+        CULL_FACE_MODE,
+
+        NUM_TOTAL_FLAGS
+    };
+    std::unordered_map<uint, bool> getPropertyFallthroughs() { return _propertyFallthroughs; }
+    bool getPropertyFallthrough(uint property) { return _propertyFallthroughs[property]; }
+    void setPropertyDoesFallthrough(uint property) { _propertyFallthroughs[property] = true; }
+
+    virtual bool isProcedural() const { return false; }
+    virtual bool isEnabled() const { return true; }
+    virtual bool isReady() const { return true; }
+    virtual QString getProceduralString() const { return QString(); }
+
+    static const std::string HIFI_PBR;
+    static const std::string HIFI_SHADER_SIMPLE;
 
 protected:
     std::string _name { "" };
 
 private:
-    mutable MaterialKey _key;
-    mutable UniformBufferView _schemaBuffer;
-    mutable gpu::TextureTablePointer _textureTable{ std::make_shared<gpu::TextureTable>() };
+    std::string _model { HIFI_PBR };
+    mutable MaterialKey _key { 0 };
 
+    // Material properties
+    glm::vec3 _emissive { DEFAULT_EMISSIVE };
+    float _opacity { DEFAULT_OPACITY };
+    glm::vec3 _albedo { DEFAULT_ALBEDO };
+    float _roughness { DEFAULT_ROUGHNESS };
+    float _metallic { DEFAULT_METALLIC };
+    float _scattering { DEFAULT_SCATTERING };
+    float _opacityCutoff { DEFAULT_OPACITY_CUTOFF };
+    std::array<glm::mat4, NUM_TEXCOORD_TRANSFORMS> _texcoordTransforms;
+    glm::vec2 _lightmapParams { 0.0, 1.0 };
+    glm::vec2 _materialParams { 0.0, 1.0 };
+    MaterialKey::CullFaceMode _cullFaceMode { DEFAULT_CULL_FACE_MODE };
     TextureMaps _textureMaps;
 
-    mutable QMutex _textureMapsMutex { QMutex::Recursive };
-    mutable size_t _textureSize { 0 };
-    mutable int _textureCount { 0 };
-    mutable bool _hasCalculatedTextureInfo { false };
-    bool calculateMaterialInfo() const;
+    bool _defaultFallthrough { false };
+    std::unordered_map<uint, bool> _propertyFallthroughs { NUM_TOTAL_FLAGS };
 
-    std::string _model { "hifi_pbr" };
-
+    mutable std::recursive_mutex _textureMapsMutex;
 };
-typedef std::shared_ptr< Material > MaterialPointer;
+typedef std::shared_ptr<Material> MaterialPointer;
 
 class MaterialLayer {
 public:
@@ -396,9 +475,18 @@ public:
         return left.priority < right.priority;
     }
 };
+typedef std::priority_queue<MaterialLayer, std::vector<MaterialLayer>, MaterialLayerCompare> MaterialLayerQueue;
 
-class MultiMaterial : public std::priority_queue<MaterialLayer, std::vector<MaterialLayer>, MaterialLayerCompare> {
+class MultiMaterial : public MaterialLayerQueue {
 public:
+    MultiMaterial();
+
+    void push(const MaterialLayer& value) {
+        MaterialLayerQueue::push(value);
+        _hasCalculatedTextureInfo = false;
+        _needsUpdate = true;
+    }
+
     bool remove(const MaterialPointer& value) {
         auto it = c.begin();
         while (it != c.end()) {
@@ -410,11 +498,73 @@ public:
         if (it != c.end()) {
             c.erase(it);
             std::make_heap(c.begin(), c.end(), comp);
+            _hasCalculatedTextureInfo = false;
+            _needsUpdate = true;
             return true;
         } else {
             return false;
         }
     }
+
+    // Schema to access the attribute values of the material
+    class Schema {
+    public:
+        glm::vec3 _emissive { Material::DEFAULT_EMISSIVE }; // No Emissive
+        float _opacity { Material::DEFAULT_OPACITY }; // Opacity = 1 => Not Transparent
+
+        glm::vec3 _albedo { Material::DEFAULT_ALBEDO }; // Grey albedo => isAlbedo
+        float _roughness { Material::DEFAULT_ROUGHNESS }; // Roughness = 1 => Not Glossy
+
+        float _metallic { Material::DEFAULT_METALLIC }; // Not Metallic
+        float _scattering { Material::DEFAULT_SCATTERING }; // Scattering info
+        float _opacityCutoff { Material::DEFAULT_OPACITY_CUTOFF }; // Opacity cutoff applyed when using opacityMap as Mask 
+        uint32_t _key { 0 }; // a copy of the materialKey
+
+        // Texture Coord Transform Array
+        glm::mat4 _texcoordTransforms[Material::NUM_TEXCOORD_TRANSFORMS];
+
+        glm::vec2 _lightmapParams { 0.0, 1.0 };
+
+        // x: material mode (0 for UV, 1 for PROJECTED)
+        // y: 1 for texture repeat, 0 for discard outside of 0 - 1
+        glm::vec2 _materialParams { 0.0, 1.0 };
+
+        Schema() {
+            for (auto& transform : _texcoordTransforms) {
+                transform = glm::mat4();
+            }
+        }
+    };
+
+    gpu::BufferView& getSchemaBuffer() { return _schemaBuffer; }
+    graphics::MaterialKey getMaterialKey() const { return graphics::MaterialKey(_schemaBuffer.get<graphics::MultiMaterial::Schema>()._key); }
+    const gpu::TextureTablePointer& getTextureTable() const { return _textureTable; }
+
+    void setCullFaceMode(graphics::MaterialKey::CullFaceMode cullFaceMode) { _cullFaceMode = cullFaceMode; }
+    graphics::MaterialKey::CullFaceMode getCullFaceMode() const { return _cullFaceMode; }
+
+    void setNeedsUpdate(bool needsUpdate) { _needsUpdate = needsUpdate; }
+    void setTexturesLoading(bool value) { _texturesLoading = value; }
+    void setInitialized() { _initialized = true; }
+
+    bool shouldUpdate() const { return !_initialized || _needsUpdate || _texturesLoading; }
+
+    int getTextureCount() const { calculateMaterialInfo(); return _textureCount; }
+    size_t getTextureSize()  const { calculateMaterialInfo(); return _textureSize; }
+    bool hasTextureInfo() const { return _hasCalculatedTextureInfo; }
+
+private:
+    gpu::BufferView _schemaBuffer;
+    graphics::MaterialKey::CullFaceMode _cullFaceMode { graphics::Material::DEFAULT_CULL_FACE_MODE };
+    gpu::TextureTablePointer _textureTable { std::make_shared<gpu::TextureTable>() };
+    bool _needsUpdate { false };
+    bool _texturesLoading { false };
+    bool _initialized { false };
+
+    mutable size_t _textureSize { 0 };
+    mutable int _textureCount { 0 };
+    mutable bool _hasCalculatedTextureInfo { false };
+    void calculateMaterialInfo() const;
 };
 
 };

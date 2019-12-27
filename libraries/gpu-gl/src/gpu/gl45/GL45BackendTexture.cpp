@@ -24,6 +24,10 @@
 #include <gpu/TextureTable.h>
 #include <gpu/gl/GLTexelFormat.h>
 
+static const QString FORCE_MOBILE_TEXTURES_STRING{ "HIFI_FORCE_MOBILE_TEXTURES" };
+static bool FORCE_MOBILE_TEXTURES = QProcessEnvironment::systemEnvironment().contains(FORCE_MOBILE_TEXTURES_STRING);
+
+
 using namespace gpu;
 using namespace gpu::gl;
 using namespace gpu::gl45;
@@ -45,9 +49,10 @@ bool GL45Backend::supportedTextureFormat(const gpu::Element& format) {
         case gpu::Semantic::COMPRESSED_EAC_RED_SIGNED:
         case gpu::Semantic::COMPRESSED_EAC_XY:
         case gpu::Semantic::COMPRESSED_EAC_XY_SIGNED:
-            return false;
+            return FORCE_MOBILE_TEXTURES;
+
         default:
-            return true;
+            return FORCE_MOBILE_TEXTURES ? !format.isCompressed() : true;
     }
 }
 
@@ -215,79 +220,37 @@ void GL45Texture::generateMips() const {
     (void)CHECK_GL_ERROR();
 }
 
+// (NOTE: it seems to work now, but for posterity:) DSA ARB does not work on AMD, so use EXT
+// unless EXT is not available on the driver
+#define AMD_CUBE_MAP_EXT_WORKAROUND 0
+
 Size GL45Texture::copyMipFaceLinesFromTexture(uint16_t mip, uint8_t face, const uvec3& size, uint32_t yOffset, GLenum internalFormat, GLenum format, GLenum type, Size sourceSize, const void* sourcePointer) const {
     Size amountCopied = sourceSize;
+    bool compressed = GLTexelFormat::isCompressed(internalFormat);
     if (GL_TEXTURE_2D == _target) {
-        switch (internalFormat) {
-            case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
-            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
-            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
-            case GL_COMPRESSED_RED_RGTC1:
-            case GL_COMPRESSED_RG_RGTC2:
-            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
-            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
-            case GL_COMPRESSED_RGB8_ETC2:
-            case GL_COMPRESSED_SRGB8_ETC2:
-            case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2:
-            case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2:
-            case GL_COMPRESSED_RGBA8_ETC2_EAC:
-            case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC:
-            case GL_COMPRESSED_R11_EAC:
-            case GL_COMPRESSED_SIGNED_R11_EAC:
-            case GL_COMPRESSED_RG11_EAC:
-            case GL_COMPRESSED_SIGNED_RG11_EAC:
-                glCompressedTextureSubImage2D(_id, mip, 0, yOffset, size.x, size.y, internalFormat,
-                                              static_cast<GLsizei>(sourceSize), sourcePointer);
-                break;
-            default:
-                glTextureSubImage2D(_id, mip, 0, yOffset, size.x, size.y, format, type, sourcePointer);
-                break;
+        if (compressed) {
+            glCompressedTextureSubImage2D(_id, mip, 0, yOffset, size.x, size.y, internalFormat,
+                                            static_cast<GLsizei>(sourceSize), sourcePointer);
+        } else {
+            glTextureSubImage2D(_id, mip, 0, yOffset, size.x, size.y, format, type, sourcePointer);
         }
     } else if (GL_TEXTURE_CUBE_MAP == _target) {
-        switch (internalFormat) {
-            case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
-            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
-            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
-            case GL_COMPRESSED_RED_RGTC1:
-            case GL_COMPRESSED_RG_RGTC2:
-            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
-            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
-            case GL_COMPRESSED_RGB8_ETC2:
-            case GL_COMPRESSED_SRGB8_ETC2:
-            case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2:
-            case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2:
-            case GL_COMPRESSED_RGBA8_ETC2_EAC:
-            case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC:
-            case GL_COMPRESSED_R11_EAC:
-            case GL_COMPRESSED_SIGNED_R11_EAC:
-            case GL_COMPRESSED_RG11_EAC:
-            case GL_COMPRESSED_SIGNED_RG11_EAC:
-                if (glCompressedTextureSubImage2DEXT) {
-                    auto target = GLTexture::CUBE_FACE_LAYOUT[face];
-                    glCompressedTextureSubImage2DEXT(_id, target, mip, 0, yOffset, size.x, size.y, internalFormat,
-                                                     static_cast<GLsizei>(sourceSize), sourcePointer);
-                } else {
-                    glCompressedTextureSubImage3D(_id, mip, 0, yOffset, face, size.x, size.y, 1, internalFormat,
-                                                  static_cast<GLsizei>(sourceSize), sourcePointer);
-                }
-                break;
-            default:
-                // DSA ARB does not work on AMD, so use EXT
-                // unless EXT is not available on the driver
-                if (glTextureSubImage2DEXT) {
-                    auto target = GLTexture::CUBE_FACE_LAYOUT[face];
-                    glTextureSubImage2DEXT(_id, target, mip, 0, yOffset, size.x, size.y, format, type, sourcePointer);
-                } else {
-                    glTextureSubImage3D(_id, mip, 0, yOffset, face, size.x, size.y, 1, format, type, sourcePointer);
-                }
-                break;
+        // DSA and cubemap functions are notoriously buggy. use the 4.1 compatible pathway
+        glActiveTexture(GL_TEXTURE0 + GL45Backend::RESOURCE_TRANSFER_TEX_UNIT);
+        glBindTexture(_target, _texture);
+        auto target = GLTexture::CUBE_FACE_LAYOUT[face];
+        if (compressed) {
+            glCompressedTexSubImage2D(target, mip, 0, yOffset, size.x, size.y, internalFormat,
+                                        static_cast<GLsizei>(sourceSize), sourcePointer);
+        } else {
+            glTexSubImage2D(target, mip, 0, yOffset, size.x, size.y, format, type, sourcePointer);
         }
+        glBindTexture(_target, 0);
     } else {
         assert(false);
         amountCopied = 0;
     }
     (void)CHECK_GL_ERROR();
-
     return amountCopied;
 }
 
@@ -375,11 +338,22 @@ void GL45FixedAllocationTexture::allocateStorage() const {
     const auto dimensions = _gpuObject.getDimensions();
     const auto mips = _gpuObject.getNumMips();
     const auto numSlices = _gpuObject.getNumSlices();
+    const auto numSamples = _gpuObject.getNumSamples();
 
-    if (!_gpuObject.isArray()) {
-        glTextureStorage2D(_id, mips, texelFormat.internalFormat, dimensions.x, dimensions.y);
+
+    if (!_gpuObject.isMultisample()) {
+        if (!_gpuObject.isArray()) {
+            glTextureStorage2D(_id, mips, texelFormat.internalFormat, dimensions.x, dimensions.y);
+        } else {
+            glTextureStorage3D(_id, mips, texelFormat.internalFormat, dimensions.x, dimensions.y, numSlices);
+        }
     } else {
-        glTextureStorage3D(_id, mips, texelFormat.internalFormat, dimensions.x, dimensions.y, numSlices);
+        if (!_gpuObject.isArray()) {
+            glTextureStorage2DMultisample(_id, numSamples, texelFormat.internalFormat, dimensions.x, dimensions.y, GL_FALSE);
+        }
+        else {
+            glTextureStorage3DMultisample(_id, numSamples, texelFormat.internalFormat, dimensions.x, dimensions.y, numSlices, GL_FALSE);
+        }
     }
 
     glTextureParameteri(_id, GL_TEXTURE_BASE_LEVEL, 0);

@@ -13,8 +13,8 @@
 
 import Hifi 1.0 as Hifi
 import QtQuick 2.5
-import "../../../styles-uit"
-import "../../../controls-uit" as HifiControlsUit
+import stylesUit 1.0
+import controlsUit 1.0 as HifiControlsUit
 import "../../../controls" as HifiControls
 
 // references XXX from root context
@@ -93,7 +93,7 @@ Item {
         // Text below helper text
         RalewayRegular {
             id: loginDetailText;
-            text: "To buy/sell items on the <b>Marketplace</b>, or to use your <b>Wallet</b>, you must first log in to High Fidelity.";
+            text: "To get items on the <b>Marketplace</b>, or to use your <b>Assets</b>, you must first log in to High Fidelity.";
             // Text size
             size: 18;
             // Anchors
@@ -137,7 +137,7 @@ Item {
                 width: parent.width/2 - anchors.leftMargin*2;
                 text: "Cancel"
                 onClicked: {
-                    sendToScript({method: 'needsLogIn_cancelClicked'});
+                    sendToScript({method: 'passphrasePopup_cancelClicked'});
                 }
             }
 
@@ -155,7 +155,7 @@ Item {
                 width: parent.width/2 - anchors.rightMargin*2;
                 text: "Log In"
                 onClicked: {
-                    sendToScript({method: 'needsLogIn_loginClicked'});
+                    sendToScript({method: 'marketplace_loginClicked'});
                 }
             }
         }
@@ -183,7 +183,7 @@ Item {
     function fromScript(message) {
         switch (message.method) {
             default:
-                console.log('Unrecognized message from wallet.js:', JSON.stringify(message));
+                console.log('NeedsLogIn.qml: Unrecognized message from wallet.js');
         }
     }
     signal sendSignalToWallet(var msg);

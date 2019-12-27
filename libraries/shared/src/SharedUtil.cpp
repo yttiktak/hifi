@@ -22,8 +22,8 @@
 #include <unordered_map>
 #include <chrono>
 
+#include <QtCore/QOperatingSystemVersion>
 #include <glm/glm.hpp>
-
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -348,7 +348,7 @@ unsigned char* pointToVoxel(float x, float y, float z, float s, unsigned char r,
     }
 
     auto voxelSizeInBytes = bytesRequiredForCodeLength(voxelSizeInOctets); // (voxelSizeInBits/8)+1;
-    auto voxelBufferSize = voxelSizeInBytes + sizeof(rgbColor); // 3 for color
+    auto voxelBufferSize = voxelSizeInBytes + sizeof(glm::u8vec3); // 3 for color
 
     // allocate our resulting buffer
     unsigned char* voxelOut = new unsigned char[voxelBufferSize];
@@ -794,15 +794,7 @@ void printSystemInformation() {
     qCDebug(shared).noquote() << "\tKernel Type: " << QSysInfo::kernelType();
     qCDebug(shared).noquote() << "\tKernel Version: " << QSysInfo::kernelVersion();
 
-    auto macVersion = QSysInfo::macVersion();
-    if (macVersion != QSysInfo::MV_None) {
-        qCDebug(shared) << "\tMac Version: " << macVersion;
-    }
-
-    auto windowsVersion = QSysInfo::windowsVersion();
-    if (windowsVersion != QSysInfo::WV_None) {
-        qCDebug(shared) << "\tWindows Version: " << windowsVersion;
-    }
+    qCDebug(shared) << "\tOS Version: " << QOperatingSystemVersion::current();
 
 #ifdef Q_OS_WIN
     SYSTEM_INFO si;

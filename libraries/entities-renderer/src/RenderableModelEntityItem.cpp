@@ -83,34 +83,6 @@ void RenderableModelEntityItem::setUnscaledDimensions(const glm::vec3& value) {
     }
 }
 
-QVariantMap parseTexturesToMap(QString textures, const QVariantMap& defaultTextures) {
-    // If textures are unset, revert to original textures
-    if (textures.isEmpty()) {
-        return defaultTextures;
-    }
-
-    // Legacy: a ,\n-delimited list of filename:"texturepath"
-    if (*textures.cbegin() != '{') {
-        textures = "{\"" + textures.replace(":\"", "\":\"").replace(",\n", ",\"") + "}";
-    }
-
-    QJsonParseError error;
-    QJsonDocument texturesJson = QJsonDocument::fromJson(textures.toUtf8(), &error);
-    // If textures are invalid, revert to original textures
-    if (error.error != QJsonParseError::NoError) {
-        qCWarning(entitiesrenderer) << "Could not evaluate textures property value:" << textures;
-        return defaultTextures;
-    }
-
-    QVariantMap texturesMap = texturesJson.toVariant().toMap();
-    // If textures are unset, revert to original textures
-    if (texturesMap.isEmpty()) {
-        return defaultTextures;
-    }
-
-    return texturesJson.toVariant().toMap();
-}
-
 void RenderableModelEntityItem::doInitialModelSimulation() {
     DETAILED_PROFILE_RANGE(simulation_physics, __FUNCTION__);
     ModelPointer model = getModel();
@@ -209,9 +181,11 @@ void RenderableModelEntityItem::updateModelBounds() {
         updateRenderItems = true;
     }
 
-    if (model->getScaleToFitDimensions() != getScaledDimensions() ||
-            model->getRegistrationPoint() != getRegistrationPoint() ||
-            !model->getIsScaledToFit()) {
+    bool overridingModelTransform = model->isOverridingModelTransformAndOffset();
+    if (!overridingModelTransform &&
+        (model->getScaleToFitDimensions() != getScaledDimensions() ||
+         model->getRegistrationPoint() != getRegistrationPoint() ||
+         !model->getIsScaledToFit())) {
         // The machinery for updateModelBounds will give existing models the opportunity to fix their
         // translation/rotation/scale/registration.  The first two are straightforward, but the latter two
         // have guards to make sure they don't happen after they've already been set.  Here we reset those guards.
@@ -268,7 +242,7 @@ EntityItemProperties RenderableModelEntityItem::getProperties(const EntityProper
         if (model->isLoaded()) {
             // TODO: improve naturalDimensions in the future,
             //       for now we've added this hack for setting natural dimensions of models
-            Extents meshExtents = model->getFBXGeometry().getUnscaledMeshExtents();
+            Extents meshExtents = model->getHFMModel().getUnscaledMeshExtents();
             properties.setNaturalDimensions(meshExtents.maximum - meshExtents.minimum);
             properties.calculateNaturalPosition(meshExtents.minimum, meshExtents.maximum);
         }
@@ -307,44 +281,36 @@ bool RenderableModelEntityItem::findDetailedParabolaIntersection(const glm::vec3
         face, surfaceNormal, extraInfo, precisionPicking, false);
 }
 
-void RenderableModelEntityItem::getCollisionGeometryResource() {
-    QUrl hullURL(getCompoundShapeURL());
-    QUrlQuery queryArgs(hullURL);
-    queryArgs.addQueryItem("collision-hull", "");
-    hullURL.setQuery(queryArgs);
-    _compoundShapeResource = DependencyManager::get<ModelCache>()->getCollisionGeometryResource(hullURL);
+void RenderableModelEntityItem::fetchCollisionGeometryResource() {
+    _collisionGeometryResource = DependencyManager::get<ModelCache>()->getCollisionModelResource(getCollisionShapeURL());
 }
 
-bool RenderableModelEntityItem::computeShapeFailedToLoad() {
-    if (!_compoundShapeResource) {
-        getCollisionGeometryResource();
+bool RenderableModelEntityItem::unableToLoadCollisionShape() {
+    if (!_collisionGeometryResource) {
+        fetchCollisionGeometryResource();
     }
-
-    return (_compoundShapeResource && _compoundShapeResource->isFailed());
+    return (_collisionGeometryResource && _collisionGeometryResource->isFailed());
 }
 
 void RenderableModelEntityItem::setShapeType(ShapeType type) {
     ModelEntityItem::setShapeType(type);
-    if (getShapeType() == SHAPE_TYPE_COMPOUND) {
-        if (!_compoundShapeResource && !getCompoundShapeURL().isEmpty()) {
-            getCollisionGeometryResource();
+    auto shapeType = getShapeType();
+    if (shapeType == SHAPE_TYPE_COMPOUND || shapeType == SHAPE_TYPE_SIMPLE_COMPOUND) {
+        if (!_collisionGeometryResource && !getCollisionShapeURL().isEmpty()) {
+            fetchCollisionGeometryResource();
         }
-    } else if (_compoundShapeResource && !getCompoundShapeURL().isEmpty()) {
+    } else if (_collisionGeometryResource && !getCompoundShapeURL().isEmpty()) {
         // the compoundURL has been set but the shapeType does not agree
-        _compoundShapeResource.reset();
+        _collisionGeometryResource.reset();
     }
 }
 
 void RenderableModelEntityItem::setCompoundShapeURL(const QString& url) {
-    // because the caching system only allows one Geometry per url, and because this url might also be used
-    // as a visual model, we need to change this url in some way.  We add a "collision-hull" query-arg so it
-    // will end up in a different hash-key in ResourceCache.  TODO: It would be better to use the same URL and
-    // parse it twice.
     auto currentCompoundShapeURL = getCompoundShapeURL();
     ModelEntityItem::setCompoundShapeURL(url);
     if (getCompoundShapeURL() != currentCompoundShapeURL || !getModel()) {
         if (getShapeType() == SHAPE_TYPE_COMPOUND) {
-            getCollisionGeometryResource();
+            fetchCollisionGeometryResource();
         }
     }
 }
@@ -352,22 +318,25 @@ void RenderableModelEntityItem::setCompoundShapeURL(const QString& url) {
 bool RenderableModelEntityItem::isReadyToComputeShape() const {
     ShapeType type = getShapeType();
     auto model = getModel();
-    if (type == SHAPE_TYPE_COMPOUND) {
-        if (!model || getCompoundShapeURL().isEmpty()) {
+    auto shapeType = getShapeType();
+    if (shapeType == SHAPE_TYPE_COMPOUND || shapeType == SHAPE_TYPE_SIMPLE_COMPOUND) {
+        auto shapeURL = getCollisionShapeURL();
+
+        if (!model || shapeURL.isEmpty()) {
             return false;
         }
 
-        if (model->getURL().isEmpty()) {
+        if (model->getURL().isEmpty() || !_dimensionsInitialized) {
             // we need a render geometry with a scale to proceed, so give up.
             return false;
         }
 
         if (model->isLoaded()) {
-            if (!getCompoundShapeURL().isEmpty() && !_compoundShapeResource) {
-                const_cast<RenderableModelEntityItem*>(this)->getCollisionGeometryResource();
+            if (!shapeURL.isEmpty() && !_collisionGeometryResource) {
+                const_cast<RenderableModelEntityItem*>(this)->fetchCollisionGeometryResource();
             }
 
-            if (_compoundShapeResource && _compoundShapeResource->isLoaded()) {
+            if (_collisionGeometryResource && _collisionGeometryResource->isLoaded()) {
                 // we have both URLs AND both geometries AND they are both fully loaded.
                 if (_needsInitialSimulation) {
                     // the _model's offset will be wrong until _needsInitialSimulation is false
@@ -388,74 +357,57 @@ bool RenderableModelEntityItem::isReadyToComputeShape() const {
 
 void RenderableModelEntityItem::computeShapeInfo(ShapeInfo& shapeInfo) {
     const uint32_t TRIANGLE_STRIDE = 3;
-    const uint32_t QUAD_STRIDE = 4;
 
     ShapeType type = getShapeType();
-    glm::vec3 dimensions = getScaledDimensions();
+
     auto model = getModel();
+    if (!model || !model->isLoaded()) {
+        type = SHAPE_TYPE_NONE;
+    }
+
     if (type == SHAPE_TYPE_COMPOUND) {
+        if (!_collisionGeometryResource || !_collisionGeometryResource->isLoaded()) {
+            return;
+        }
+
         updateModelBounds();
 
         // should never fall in here when collision model not fully loaded
         // TODO: assert that all geometries exist and are loaded
-        //assert(_model && _model->isLoaded() && _compoundShapeResource && _compoundShapeResource->isLoaded());
-        const FBXGeometry& collisionGeometry = _compoundShapeResource->getFBXGeometry();
+        //assert(_model && _model->isLoaded() && _collisionGeometryResource && _collisionGeometryResource->isLoaded());
+        const HFMModel& collisionGeometry = _collisionGeometryResource->getHFMModel();
 
         ShapeInfo::PointCollection& pointCollection = shapeInfo.getPointCollection();
         pointCollection.clear();
-        uint32_t i = 0;
+
+        size_t numParts = 0;
+        for (const HFMMesh& mesh : collisionGeometry.meshes) {
+            numParts += mesh.triangleListMesh.parts.size();
+        }
+        pointCollection.reserve(numParts);
 
         // the way OBJ files get read, each section under a "g" line is its own meshPart.  We only expect
         // to find one actual "mesh" (with one or more meshParts in it), but we loop over the meshes, just in case.
-        foreach (const FBXMesh& mesh, collisionGeometry.meshes) {
+        for (const HFMMesh& mesh : collisionGeometry.meshes) {
+            const hfm::TriangleListMesh& triangleListMesh = mesh.triangleListMesh;
             // each meshPart is a convex hull
-            foreach (const FBXMeshPart &meshPart, mesh.parts) {
-                pointCollection.push_back(QVector<glm::vec3>());
-                ShapeInfo::PointList& pointsInPart = pointCollection[i];
-
+            for (const glm::ivec2& part : triangleListMesh.parts) {
                 // run through all the triangles and (uniquely) add each point to the hull
-                uint32_t numIndices = (uint32_t)meshPart.triangleIndices.size();
-                // TODO: assert rather than workaround after we start sanitizing FBXMesh higher up
+
+                pointCollection.emplace_back();
+                ShapeInfo::PointList& pointsInPart = pointCollection.back();
+
+                uint32_t numIndices = (uint32_t)part.y;
+                // TODO: assert rather than workaround after we start sanitizing HFMMesh higher up
                 //assert(numIndices % TRIANGLE_STRIDE == 0);
-                numIndices -= numIndices % TRIANGLE_STRIDE; // WORKAROUND lack of sanity checking in FBXReader
-
-                for (uint32_t j = 0; j < numIndices; j += TRIANGLE_STRIDE) {
-                    glm::vec3 p0 = mesh.vertices[meshPart.triangleIndices[j]];
-                    glm::vec3 p1 = mesh.vertices[meshPart.triangleIndices[j + 1]];
-                    glm::vec3 p2 = mesh.vertices[meshPart.triangleIndices[j + 2]];
-                    if (!pointsInPart.contains(p0)) {
-                        pointsInPart << p0;
-                    }
-                    if (!pointsInPart.contains(p1)) {
-                        pointsInPart << p1;
-                    }
-                    if (!pointsInPart.contains(p2)) {
-                        pointsInPart << p2;
-                    }
-                }
-
-                // run through all the quads and (uniquely) add each point to the hull
-                numIndices = (uint32_t)meshPart.quadIndices.size();
-                // TODO: assert rather than workaround after we start sanitizing FBXMesh higher up
-                //assert(numIndices % QUAD_STRIDE == 0);
-                numIndices -= numIndices % QUAD_STRIDE; // WORKAROUND lack of sanity checking in FBXReader
-
-                for (uint32_t j = 0; j < numIndices; j += QUAD_STRIDE) {
-                    glm::vec3 p0 = mesh.vertices[meshPart.quadIndices[j]];
-                    glm::vec3 p1 = mesh.vertices[meshPart.quadIndices[j + 1]];
-                    glm::vec3 p2 = mesh.vertices[meshPart.quadIndices[j + 2]];
-                    glm::vec3 p3 = mesh.vertices[meshPart.quadIndices[j + 3]];
-                    if (!pointsInPart.contains(p0)) {
-                        pointsInPart << p0;
-                    }
-                    if (!pointsInPart.contains(p1)) {
-                        pointsInPart << p1;
-                    }
-                    if (!pointsInPart.contains(p2)) {
-                        pointsInPart << p2;
-                    }
-                    if (!pointsInPart.contains(p3)) {
-                        pointsInPart << p3;
+                numIndices -= numIndices % TRIANGLE_STRIDE; // WORKAROUND lack of sanity checking in FBXSerializer
+                uint32_t indexStart = (uint32_t)part.x;
+                uint32_t indexEnd = indexStart + numIndices;
+                for (uint32_t j = indexStart; j < indexEnd; ++j) {
+                    // NOTE: It seems odd to skip vertices when initializing a btConvexHullShape, but let's keep the behavior similar to the old behavior for now
+                    glm::vec3 point = triangleListMesh.vertices[triangleListMesh.indices[j]];
+                    if (std::find(pointsInPart.cbegin(), pointsInPart.cend(), point) == pointsInPart.cend()) {
+                        pointsInPart.push_back(point);
                     }
                 }
 
@@ -464,7 +416,6 @@ void RenderableModelEntityItem::computeShapeInfo(ShapeInfo& shapeInfo) {
                     pointCollection.pop_back();
                     continue;
                 }
-                ++i;
             }
         }
 
@@ -474,56 +425,83 @@ void RenderableModelEntityItem::computeShapeInfo(ShapeInfo& shapeInfo) {
         // to the visual model and apply them to the collision model (without regard for the
         // collision model's extents).
 
-        glm::vec3 scaleToFit = dimensions / model->getFBXGeometry().getUnscaledMeshExtents().size();
+        glm::vec3 dimensions = getScaledDimensions();
+        glm::vec3 scaleToFit = dimensions / model->getHFMModel().getUnscaledMeshExtents().size();
         // multiply each point by scale before handing the point-set off to the physics engine.
         // also determine the extents of the collision model.
         glm::vec3 registrationOffset = dimensions * (ENTITY_ITEM_DEFAULT_REGISTRATION_POINT - getRegistrationPoint());
-        for (int32_t i = 0; i < pointCollection.size(); i++) {
-            for (int32_t j = 0; j < pointCollection[i].size(); j++) {
+        for (size_t i = 0; i < pointCollection.size(); i++) {
+            for (size_t j = 0; j < pointCollection[i].size(); j++) {
                 // back compensate for registration so we can apply that offset to the shapeInfo later
                 pointCollection[i][j] = scaleToFit * (pointCollection[i][j] + model->getOffset()) - registrationOffset;
             }
         }
         shapeInfo.setParams(type, dimensions, getCompoundShapeURL());
+        adjustShapeInfoByRegistration(shapeInfo);
     } else if (type >= SHAPE_TYPE_SIMPLE_HULL && type <= SHAPE_TYPE_STATIC_MESH) {
-        // TODO: assert we never fall in here when model not fully loaded
-        // assert(_model && _model->isLoaded());
-
         updateModelBounds();
+        // assert we never fall in here when model not fully loaded
+        assert(model && model->isLoaded());
         model->updateGeometry();
 
         // compute meshPart local transforms
-        QVector<glm::mat4> localTransforms;
-        const FBXGeometry& fbxGeometry = model->getFBXGeometry();
-        int numFbxMeshes = fbxGeometry.meshes.size();
-        int totalNumVertices = 0;
+        const HFMModel& hfmModel = model->getHFMModel();
+        glm::vec3 dimensions = getScaledDimensions();
         glm::mat4 invRegistraionOffset = glm::translate(dimensions * (getRegistrationPoint() - ENTITY_ITEM_DEFAULT_REGISTRATION_POINT));
-        for (int i = 0; i < numFbxMeshes; i++) {
-            const FBXMesh& mesh = fbxGeometry.meshes.at(i);
-            if (mesh.clusters.size() > 0) {
-                const FBXCluster& cluster = mesh.clusters.at(0);
-                auto jointMatrix = model->getRig().getJointTransform(cluster.jointIndex);
-                // we backtranslate by the registration offset so we can apply that offset to the shapeInfo later
-                localTransforms.push_back(invRegistraionOffset * jointMatrix * cluster.inverseBindMatrix);
-            } else {
-                glm::mat4 identity;
-                localTransforms.push_back(invRegistraionOffset);
-            }
-            totalNumVertices += mesh.vertices.size();
+
+        ShapeInfo::TriangleIndices& triangleIndices = shapeInfo.getTriangleIndices();
+        triangleIndices.clear();
+
+        Extents extents;
+        int32_t shapeCount = 0;
+        int32_t instanceIndex = 0;
+
+        // NOTE: Each pointCollection corresponds to a mesh. Therefore, we should have one pointCollection per mesh instance
+        // A mesh instance is a unique combination of mesh/transform. For every mesh instance, there are as many shapes as there are parts for that mesh.
+        // We assume the shapes are grouped by mesh instance, and the group contains one of each mesh part.
+        uint32_t numInstances = 0;
+        std::vector<std::vector<std::vector<uint32_t>>> shapesPerInstancePerMesh;
+        shapesPerInstancePerMesh.resize(hfmModel.meshes.size());
+        for (uint32_t shapeIndex = 0; shapeIndex < hfmModel.shapes.size();) {
+            const auto& shape = hfmModel.shapes[shapeIndex];
+            uint32_t meshIndex = shape.mesh;
+            const auto& mesh = hfmModel.meshes[meshIndex];
+            uint32_t numMeshParts = (uint32_t)mesh.parts.size();
+            assert(numMeshParts != 0);
+
+            auto& shapesPerInstance = shapesPerInstancePerMesh[meshIndex];
+            shapesPerInstance.emplace_back();
+
+            auto& shapes = shapesPerInstance.back();
+            shapes.resize(numMeshParts);
+            std::iota(shapes.begin(), shapes.end(), shapeIndex);
+
+            shapeIndex += numMeshParts;
+            ++numInstances;
         }
-        const int32_t MAX_VERTICES_PER_STATIC_MESH = 1e6;
-        if (totalNumVertices > MAX_VERTICES_PER_STATIC_MESH) {
-            qWarning() << "model" << getModelURL() << "has too many vertices" << totalNumVertices << "and will collide as a box.";
+
+        const uint32_t MAX_ALLOWED_MESH_COUNT = 1000;
+        if (numInstances > MAX_ALLOWED_MESH_COUNT) {
+            // too many will cause the deadlock timer to throw...
+            qWarning() << "model" << getModelURL() << "has too many collision meshes" << numInstances << "and will collide as a box.";
             shapeInfo.setParams(SHAPE_TYPE_BOX, 0.5f * dimensions);
             return;
         }
 
-        auto& meshes = model->getGeometry()->getMeshes();
-        int32_t numMeshes = (int32_t)(meshes.size());
-
-        const int MAX_ALLOWED_MESH_COUNT = 1000;
-        if (numMeshes > MAX_ALLOWED_MESH_COUNT) {
-            // too many will cause the deadlock timer to throw...
+        size_t totalNumVertices = 0;
+        for (const auto& shapesPerInstance : shapesPerInstancePerMesh) {
+            for (const auto& instanceShapes : shapesPerInstance) {
+                const uint32_t firstShapeIndex = instanceShapes.front();
+                const auto& firstShape = hfmModel.shapes[firstShapeIndex];
+                const auto& mesh = hfmModel.meshes[firstShape.mesh];
+                const auto& triangleListMesh = mesh.triangleListMesh;
+                // Added once per instance per mesh
+                totalNumVertices += triangleListMesh.vertices.size();
+            }
+        }
+        const size_t MAX_VERTICES_PER_STATIC_MESH = 1e6;
+        if (totalNumVertices > MAX_VERTICES_PER_STATIC_MESH) {
+            qWarning() << "model" << getModelURL() << "has too many vertices" << totalNumVertices << "and will collide as a box.";
             shapeInfo.setParams(SHAPE_TYPE_BOX, 0.5f * dimensions);
             return;
         }
@@ -531,169 +509,118 @@ void RenderableModelEntityItem::computeShapeInfo(ShapeInfo& shapeInfo) {
         ShapeInfo::PointCollection& pointCollection = shapeInfo.getPointCollection();
         pointCollection.clear();
         if (type == SHAPE_TYPE_SIMPLE_COMPOUND) {
-            pointCollection.resize(numMeshes);
+            pointCollection.resize(numInstances);
         } else {
             pointCollection.resize(1);
         }
 
-        ShapeInfo::TriangleIndices& triangleIndices = shapeInfo.getTriangleIndices();
-        triangleIndices.clear();
+        for (uint32_t meshIndex = 0; meshIndex < hfmModel.meshes.size(); ++meshIndex) {
+            const auto& mesh = hfmModel.meshes[meshIndex];
+            const auto& triangleListMesh = mesh.triangleListMesh;
+            const auto& vertices = triangleListMesh.vertices;
+            const auto& indices = triangleListMesh.indices;
+            const std::vector<glm::ivec2>& parts = triangleListMesh.parts;
 
-        Extents extents;
-        int32_t meshCount = 0;
-        int32_t pointListIndex = 0;
-        for (auto& mesh : meshes) {
-            if (!mesh) {
-                continue;
-            }
-            const gpu::BufferView& vertices = mesh->getVertexBuffer();
-            const gpu::BufferView& indices = mesh->getIndexBuffer();
-            const gpu::BufferView& parts = mesh->getPartBuffer();
+            const auto& shapesPerInstance = shapesPerInstancePerMesh[meshIndex];
+            for (const std::vector<uint32_t>& instanceShapes : shapesPerInstance) {
+                ShapeInfo::PointList& points = pointCollection[instanceIndex];
 
-            ShapeInfo::PointList& points = pointCollection[pointListIndex];
+                // reserve room
+                int32_t sizeToReserve = (int32_t)(vertices.size());
+                if (type == SHAPE_TYPE_SIMPLE_COMPOUND) {
+                    // a list of points for each instance
+                    instanceIndex++;
+                } else {
+                    // only one list of points
+                    sizeToReserve += (int32_t)((gpu::Size)points.size());
+                }
+                points.reserve(sizeToReserve);
+                
+                // get mesh instance transform
+                const uint32_t meshIndexOffset = (uint32_t)points.size();
+                const uint32_t instanceShapeIndexForTransform = instanceShapes.front();
+                const auto& instanceShapeForTransform = hfmModel.shapes[instanceShapeIndexForTransform];
+                glm::mat4 localTransform;
+                if (instanceShapeForTransform.joint != hfm::UNDEFINED_KEY) {
+                    auto jointMatrix = model->getRig().getJointTransform(instanceShapeForTransform.joint);
+                    // we backtranslate by the registration offset so we can apply that offset to the shapeInfo later
+                    if (instanceShapeForTransform.skinDeformer != hfm::UNDEFINED_KEY) {
+                        const auto& skinDeformer = hfmModel.skinDeformers[instanceShapeForTransform.skinDeformer];
+                        glm::mat4 inverseBindMatrix;
+                        if (!skinDeformer.clusters.empty()) {
+                            const auto& cluster = skinDeformer.clusters.back();
+                            inverseBindMatrix = cluster.inverseBindMatrix;
+                        }
+                        localTransform = invRegistraionOffset * jointMatrix * inverseBindMatrix;
+                    } else {
+                        localTransform = invRegistraionOffset * jointMatrix;
+                    }
+                } else {
+                    localTransform = invRegistraionOffset;
+                }
 
-            // reserve room
-            int32_t sizeToReserve = (int32_t)(vertices.getNumElements());
-            if (type == SHAPE_TYPE_SIMPLE_COMPOUND) {
-                // a list of points for each mesh
-                pointListIndex++;
-            } else {
-                // only one list of points
-                sizeToReserve += (int32_t)((gpu::Size)points.size());
-            }
-            points.reserve(sizeToReserve);
+                // copy points
+                auto vertexItr = vertices.cbegin();
+                while (vertexItr != vertices.cend()) {
+                    glm::vec3 point = extractTranslation(localTransform * glm::translate(*vertexItr));
+                    points.push_back(point);
+                    ++vertexItr;
+                }
+                for (const auto& instanceShapeIndex : instanceShapes) {
+                    const auto& instanceShape = hfmModel.shapes[instanceShapeIndex];
+                    extents.addExtents(instanceShape.transformedExtents);
+                }
 
-            // copy points
-            uint32_t meshIndexOffset = (uint32_t)points.size();
-            const glm::mat4& localTransform = localTransforms[meshCount];
-            gpu::BufferView::Iterator<const glm::vec3> vertexItr = vertices.cbegin<const glm::vec3>();
-            while (vertexItr != vertices.cend<const glm::vec3>()) {
-                glm::vec3 point = extractTranslation(localTransform * glm::translate(*vertexItr));
-                points.push_back(point);
-                extents.addPoint(point);
-                ++vertexItr;
-            }
-
-            if (type == SHAPE_TYPE_STATIC_MESH) {
-                // copy into triangleIndices
-                triangleIndices.reserve((int32_t)((gpu::Size)(triangleIndices.size()) + indices.getNumElements()));
-                gpu::BufferView::Iterator<const graphics::Mesh::Part> partItr = parts.cbegin<const graphics::Mesh::Part>();
-                while (partItr != parts.cend<const graphics::Mesh::Part>()) {
-                    auto numIndices = partItr->_numIndices;
-                    if (partItr->_topology == graphics::Mesh::TRIANGLES) {
-                        // TODO: assert rather than workaround after we start sanitizing FBXMesh higher up
+                if (type == SHAPE_TYPE_STATIC_MESH) {
+                    // copy into triangleIndices
+                    triangleIndices.reserve((int32_t)((gpu::Size)(triangleIndices.size()) + indices.size()));
+                    auto partItr = parts.cbegin();
+                    while (partItr != parts.cend()) {
+                        auto numIndices = partItr->y;
+                        // TODO: assert rather than workaround after we start sanitizing HFMMesh higher up
                         //assert(numIndices % TRIANGLE_STRIDE == 0);
-                        numIndices -= numIndices % TRIANGLE_STRIDE; // WORKAROUND lack of sanity checking in FBXReader
-
-                        auto indexItr = indices.cbegin<const gpu::BufferView::Index>() + partItr->_startIndex;
+                        numIndices -= numIndices % TRIANGLE_STRIDE; // WORKAROUND lack of sanity checking in FBXSerializer
+                        auto indexItr = indices.cbegin() + partItr->x;
                         auto indexEnd = indexItr + numIndices;
                         while (indexItr != indexEnd) {
                             triangleIndices.push_back(*indexItr + meshIndexOffset);
                             ++indexItr;
                         }
-                    } else if (partItr->_topology == graphics::Mesh::TRIANGLE_STRIP) {
-                        // TODO: resurrect assert after we start sanitizing FBXMesh higher up
-                        //assert(numIndices > 2);
-
-                        uint32_t approxNumIndices = TRIANGLE_STRIDE * numIndices;
-                        if (approxNumIndices > (uint32_t)(triangleIndices.capacity() - triangleIndices.size())) {
-                            // we underestimated the final size of triangleIndices so we pre-emptively expand it
-                            triangleIndices.reserve(triangleIndices.size() + approxNumIndices);
-                        }
-
-                        auto indexItr = indices.cbegin<const gpu::BufferView::Index>() + partItr->_startIndex;
-                        auto indexEnd = indexItr + (numIndices - 2);
-
-                        // first triangle uses the first three indices
-                        triangleIndices.push_back(*(indexItr++) + meshIndexOffset);
-                        triangleIndices.push_back(*(indexItr++) + meshIndexOffset);
-                        triangleIndices.push_back(*(indexItr++) + meshIndexOffset);
-
-                        // the rest use previous and next index
-                        uint32_t triangleCount = 1;
-                        while (indexItr != indexEnd) {
-                            if ((*indexItr) != graphics::Mesh::PRIMITIVE_RESTART_INDEX) {
-                                if (triangleCount % 2 == 0) {
-                                    // even triangles use first two indices in order
-                                    triangleIndices.push_back(*(indexItr - 2) + meshIndexOffset);
-                                    triangleIndices.push_back(*(indexItr - 1) + meshIndexOffset);
-                                } else {
-                                    // odd triangles swap order of first two indices
-                                    triangleIndices.push_back(*(indexItr - 1) + meshIndexOffset);
-                                    triangleIndices.push_back(*(indexItr - 2) + meshIndexOffset);
-                                }
-                                triangleIndices.push_back(*indexItr + meshIndexOffset);
-                                ++triangleCount;
-                            }
-                            ++indexItr;
-                        }
+                        ++partItr;
                     }
-                    ++partItr;
-                }
-            } else if (type == SHAPE_TYPE_SIMPLE_COMPOUND) {
-                // for each mesh copy unique part indices, separated by special bogus (flag) index values
-                gpu::BufferView::Iterator<const graphics::Mesh::Part> partItr = parts.cbegin<const graphics::Mesh::Part>();
-                while (partItr != parts.cend<const graphics::Mesh::Part>()) {
-                    // collect unique list of indices for this part
-                    std::set<int32_t> uniqueIndices;
-                    auto numIndices = partItr->_numIndices;
-                    if (partItr->_topology == graphics::Mesh::TRIANGLES) {
-                        // TODO: assert rather than workaround after we start sanitizing FBXMesh higher up
+                } else if (type == SHAPE_TYPE_SIMPLE_COMPOUND) {
+                    // for each mesh copy unique part indices, separated by special bogus (flag) index values
+                    auto partItr = parts.cbegin();
+                    while (partItr != parts.cend()) {
+                        // collect unique list of indices for this part
+                        std::set<int32_t> uniqueIndices;
+                        auto numIndices = partItr->y;
+                        // TODO: assert rather than workaround after we start sanitizing HFMMesh higher up
                         //assert(numIndices% TRIANGLE_STRIDE == 0);
-                        numIndices -= numIndices % TRIANGLE_STRIDE; // WORKAROUND lack of sanity checking in FBXReader
-
-                        auto indexItr = indices.cbegin<const gpu::BufferView::Index>() + partItr->_startIndex;
+                        numIndices -= numIndices % TRIANGLE_STRIDE; // WORKAROUND lack of sanity checking in FBXSerializer
+                        auto indexItr = indices.cbegin() + partItr->x;
                         auto indexEnd = indexItr + numIndices;
                         while (indexItr != indexEnd) {
                             uniqueIndices.insert(*indexItr);
                             ++indexItr;
                         }
-                    } else if (partItr->_topology == graphics::Mesh::TRIANGLE_STRIP) {
-                        // TODO: resurrect assert after we start sanitizing FBXMesh higher up
-                        //assert(numIndices > TRIANGLE_STRIDE - 1);
 
-                        auto indexItr = indices.cbegin<const gpu::BufferView::Index>() + partItr->_startIndex;
-                        auto indexEnd = indexItr + (numIndices - 2);
-
-                        // first triangle uses the first three indices
-                        uniqueIndices.insert(*(indexItr++));
-                        uniqueIndices.insert(*(indexItr++));
-                        uniqueIndices.insert(*(indexItr++));
-
-                        // the rest use previous and next index
-                        uint32_t triangleCount = 1;
-                        while (indexItr != indexEnd) {
-                            if ((*indexItr) != graphics::Mesh::PRIMITIVE_RESTART_INDEX) {
-                                if (triangleCount % 2 == 0) {
-                                    // EVEN triangles use first two indices in order
-                                    uniqueIndices.insert(*(indexItr - 2));
-                                    uniqueIndices.insert(*(indexItr - 1));
-                                } else {
-                                    // ODD triangles swap order of first two indices
-                                    uniqueIndices.insert(*(indexItr - 1));
-                                    uniqueIndices.insert(*(indexItr - 2));
-                                }
-                                uniqueIndices.insert(*indexItr);
-                                ++triangleCount;
-                            }
-                            ++indexItr;
+                        // store uniqueIndices in triangleIndices
+                        triangleIndices.reserve(triangleIndices.size() + (int32_t)uniqueIndices.size());
+                        for (auto index : uniqueIndices) {
+                            triangleIndices.push_back(index);
                         }
-                    }
+                        // flag end of part
+                        triangleIndices.push_back(END_OF_MESH_PART);
 
-                    // store uniqueIndices in triangleIndices
-                    triangleIndices.reserve(triangleIndices.size() + (int32_t)uniqueIndices.size());
-                    for (auto index : uniqueIndices) {
-                        triangleIndices.push_back(index);
+                        ++partItr;
                     }
-                    // flag end of part
-                    triangleIndices.push_back(END_OF_MESH_PART);
-
-                    ++partItr;
+                    // flag end of mesh
+                    triangleIndices.push_back(END_OF_MESH);
                 }
-                // flag end of mesh
-                triangleIndices.push_back(END_OF_MESH);
             }
-            ++meshCount;
+
+            ++shapeCount;
         }
 
         // scale and shift
@@ -705,18 +632,16 @@ void RenderableModelEntityItem::computeShapeInfo(ShapeInfo& shapeInfo) {
             }
         }
         for (auto points : pointCollection) {
-            for (int32_t i = 0; i < points.size(); ++i) {
+            for (size_t i = 0; i < points.size(); ++i) {
                 points[i] = (points[i] * scaleToFit);
             }
         }
 
         shapeInfo.setParams(type, 0.5f * dimensions, getModelURL());
+        adjustShapeInfoByRegistration(shapeInfo);
     } else {
-        ModelEntityItem::computeShapeInfo(shapeInfo);
-        shapeInfo.setParams(type, 0.5f * dimensions);
+        EntityItem::computeShapeInfo(shapeInfo);
     }
-    // finally apply the registration offset to the shapeInfo
-    adjustShapeInfoByRegistration(shapeInfo);
 }
 
 void RenderableModelEntityItem::setJointMap(std::vector<int> jointMap) {
@@ -741,8 +666,10 @@ int RenderableModelEntityItem::avatarJointIndex(int modelJointIndex) {
 
 bool RenderableModelEntityItem::contains(const glm::vec3& point) const {
     auto model = getModel();
-    if (EntityItem::contains(point) && model && _compoundShapeResource && _compoundShapeResource->isLoaded()) {
-        return _compoundShapeResource->getFBXGeometry().convexHullContains(worldToEntity(point));
+    if (EntityItem::contains(point) && model && _collisionGeometryResource && _collisionGeometryResource->isLoaded()) {
+        glm::mat4 worldToHFMMatrix = model->getWorldToHFMMatrix();
+        glm::vec3 hfmPoint = worldToHFMMatrix * glm::vec4(point, 1.0f);
+        return _collisionGeometryResource->getHFMModel().convexHullContains(hfmPoint);
     }
 
     return false;
@@ -752,13 +679,23 @@ bool RenderableModelEntityItem::shouldBePhysical() const {
     auto model = getModel();
     // If we have a model, make sure it hasn't failed to download.
     // If it has, we'll report back that we shouldn't be physical so that physics aren't held waiting for us to be ready.
-    if (model && getShapeType() == SHAPE_TYPE_COMPOUND && model->didCollisionGeometryRequestFail()) {
-        return false;
-    } else if (model && getShapeType() != SHAPE_TYPE_NONE && model->didVisualGeometryRequestFail()) {
-        return false;
-    } else {
-        return ModelEntityItem::shouldBePhysical();
+    ShapeType shapeType = getShapeType();
+    if (model) {
+        if ((shapeType == SHAPE_TYPE_COMPOUND || shapeType == SHAPE_TYPE_SIMPLE_COMPOUND) && model->didCollisionGeometryRequestFail()) {
+            return false;
+        } else if (shapeType != SHAPE_TYPE_NONE && model->didVisualGeometryRequestFail()) {
+            return false;
+        }
     }
+    return !isDead() && shapeType != SHAPE_TYPE_NONE && !isLocalEntity() && QUrl(_modelURL).isValid();
+}
+
+int RenderableModelEntityItem::getJointParent(int index) const {
+    auto model = getModel();
+    if (model) {
+        return model->getRig().getJointParentIndex(index);
+    }
+    return -1;
 }
 
 glm::quat RenderableModelEntityItem::getAbsoluteJointRotationInObjectFrame(int index) const {
@@ -935,9 +872,9 @@ void RenderableModelEntityItem::setJointTranslationsSet(const QVector<bool>& tra
     _needsJointSimulation = true;
 }
 
-void RenderableModelEntityItem::locationChanged(bool tellPhysics) {
+void RenderableModelEntityItem::locationChanged(bool tellPhysics, bool tellChildren) {
     DETAILED_PERFORMANCE_TIMER("locationChanged");
-    EntityItem::locationChanged(tellPhysics);
+    EntityItem::locationChanged(tellPhysics, tellChildren);
     auto model = getModel();
     if (model && model->isLoaded()) {
         model->updateRenderItems();
@@ -960,16 +897,6 @@ QStringList RenderableModelEntityItem::getJointNames() const {
         }
     }
     return result;
-}
-
-// FIXME: deprecated; remove >= RC67
-bool RenderableModelEntityItem::getMeshes(MeshProxyList& result) {
-    auto model = getModel();
-    if (!model || !model->isLoaded()) {
-        return false;
-    }
-    BLOCKING_INVOKE_METHOD(model.get(), "getMeshes", Q_RETURN_ARG(MeshProxyList, result));
-    return !result.isEmpty();
 }
 
 scriptable::ScriptableModelBase render::entities::ModelEntityRenderer::getScriptableModel() {
@@ -1049,10 +976,15 @@ void RenderableModelEntityItem::copyAnimationJointDataToModel() {
     });
 
     if (changed) {
-        forEachChild([&](SpatiallyNestablePointer object) {
-            object->locationChanged(false);
-        });
+        locationChanged(true, true);
     }
+}
+
+bool RenderableModelEntityItem::readyToAnimate() const {
+    return resultWithReadLock<bool>([&] {
+        float firstFrame = _animationProperties.getFirstFrame();
+        return (firstFrame >= 0.0f) && (firstFrame <= _animationProperties.getLastFrame());
+    });
 }
 
 using namespace render;
@@ -1063,10 +995,18 @@ ModelEntityRenderer::ModelEntityRenderer(const EntityItemPointer& entity) : Pare
 }
 
 void ModelEntityRenderer::setKey(bool didVisualGeometryRequestSucceed) {
+    auto builder = ItemKey::Builder().withTypeMeta().withTagBits(getTagMask()).withLayer(getHifiRenderLayer());
+
+    if (!_cullWithParent && _model && _model->isGroupCulled()) {
+        builder.withMetaCullGroup();
+    } else if (_cullWithParent) {
+        builder.withSubMetaCulled();
+    }
+
     if (didVisualGeometryRequestSucceed) {
-        _itemKey = ItemKey::Builder().withTypeMeta().withTagBits(getTagMask());
+        _itemKey = builder.build();
     } else {
-        _itemKey = ItemKey::Builder().withTypeMeta().withTypeShape().withTagBits(getTagMask());
+        _itemKey = builder.withTypeShape().build();
     }
 }
 
@@ -1074,16 +1014,9 @@ ItemKey ModelEntityRenderer::getKey() {
     return _itemKey;
 }
 
-render::hifi::Tag ModelEntityRenderer::getTagMask() const {
-    // Default behavior for model is to not be visible in main view if cauterized (aka parented to the avatar's neck joint)
-    return _cauterized ?
-        (_isVisibleInSecondaryCamera ? render::hifi::TAG_SECONDARY_VIEW : render::hifi::TAG_NONE) :
-        Parent::getTagMask(); // calculate which views to be shown in
-}
-
-uint32_t ModelEntityRenderer::metaFetchMetaSubItems(ItemIDs& subItems) { 
+uint32_t ModelEntityRenderer::metaFetchMetaSubItems(ItemIDs& subItems) const {
     if (_model) {
-        auto metaSubItems = _subRenderItemIDs;
+        auto metaSubItems = _model->fetchRenderItemIDs();
         subItems.insert(subItems.end(), metaSubItems.begin(), metaSubItems.end());
         return (uint32_t)metaSubItems.size();
     }
@@ -1108,7 +1041,7 @@ void ModelEntityRenderer::animate(const TypedEntityPointer& entity) {
 
     QVector<EntityJointData> jointsData;
 
-    const QVector<FBXAnimationFrame>&  frames = _animation->getFramesReference(); // NOTE: getFrames() is too heavy
+    const QVector<HFMAnimationFrame>&  frames = _animation->getFramesReference(); // NOTE: getFrames() is too heavy
     int frameCount = frames.size();
     if (frameCount <= 0) {
         return;
@@ -1132,17 +1065,17 @@ void ModelEntityRenderer::animate(const TypedEntityPointer& entity) {
         return;
     }
 
-    QStringList animationJointNames = _animation->getGeometry().getJointNames();
-    auto& fbxJoints = _animation->getGeometry().joints;
+    QStringList animationJointNames = _animation->getHFMModel().getJointNames();
+    auto& hfmJoints = _animation->getHFMModel().joints;
 
-    auto& originalFbxJoints = _model->getFBXGeometry().joints;
-    auto& originalFbxIndices = _model->getFBXGeometry().jointIndices;
+    auto& originalHFMJoints = _model->getHFMModel().joints;
+    auto& originalHFMIndices = _model->getHFMModel().jointIndices;
 
     bool allowTranslation = entity->getAnimationAllowTranslation();
 
     const QVector<glm::quat>& rotations = frames[_lastKnownCurrentFrame].rotations;
     const QVector<glm::vec3>& translations = frames[_lastKnownCurrentFrame].translations;
-                
+
     jointsData.resize(_jointMapping.size());
     for (int j = 0; j < _jointMapping.size(); j++) {
         int index = _jointMapping[j];
@@ -1155,23 +1088,22 @@ void ModelEntityRenderer::animate(const TypedEntityPointer& entity) {
                     translationMat = glm::translate(translations[index]);
                 }
             } else if (index < animationJointNames.size()) {
-                QString jointName = fbxJoints[index].name; // Pushing this here so its not done on every entity, with the exceptions of those allowing for translation
-                
-                if (originalFbxIndices.contains(jointName)) {
+                QString jointName = hfmJoints[index].name; // Pushing this here so its not done on every entity, with the exceptions of those allowing for translation
+                if (originalHFMIndices.contains(jointName)) {
                     // Making sure the joint names exist in the original model the animation is trying to apply onto. If they do, then remap and get it's translation.
-                    int remappedIndex = originalFbxIndices[jointName] - 1; // JointIndeces seem to always start from 1 and the found index is always 1 higher than actual.
-                    translationMat = glm::translate(originalFbxJoints[remappedIndex].translation);
+                    int remappedIndex = originalHFMIndices[jointName] - 1; // JointIndeces seem to always start from 1 and the found index is always 1 higher than actual.
+                    translationMat = glm::translate(originalHFMJoints[remappedIndex].translation);
                 }
-            } 
+            }
             glm::mat4 rotationMat;
             if (index < rotations.size()) {
-                rotationMat = glm::mat4_cast(fbxJoints[index].preRotation * rotations[index] * fbxJoints[index].postRotation);
+                rotationMat = glm::mat4_cast(hfmJoints[index].preRotation * rotations[index] * hfmJoints[index].postRotation);
             } else {
-                rotationMat = glm::mat4_cast(fbxJoints[index].preRotation * fbxJoints[index].postRotation);
+                rotationMat = glm::mat4_cast(hfmJoints[index].preRotation * hfmJoints[index].postRotation);
             }
 
-            glm::mat4 finalMat = (translationMat * fbxJoints[index].preTransform *
-                rotationMat * fbxJoints[index].postTransform);
+            glm::mat4 finalMat = (translationMat * hfmJoints[index].preTransform *
+                rotationMat * hfmJoints[index].postTransform);
             auto& jointData = jointsData[j];
             jointData.translation = extractTranslation(finalMat);
             jointData.translationSet = true;
@@ -1239,17 +1171,9 @@ bool ModelEntityRenderer::needsRenderUpdateFromTypedEntity(const TypedEntityPoin
             return true;
         }
 
-        if (_parsedModelURL != entity->getModelURL()) {
-            return true;
-        }
-
         // No model to render, early exit
         if (!_hasModel) {
             return false;
-        }
-
-        if (_lastTextures != entity->getTextures()) {
-            return true;
         }
 
         if (_animating != entity->isAnimatingSomething()) {
@@ -1322,11 +1246,8 @@ void ModelEntityRenderer::doRenderUpdateSynchronousTyped(const ScenePointer& sce
     if (!_hasModel) {
         if (model) {
             model->removeFromScene(scene, transaction);
+            entity->bumpAncestorChainRenderableVersion();
             withWriteLock([&] { _model.reset(); });
-            transaction.updateItem<PayloadProxyInterface>(getRenderItemID(), [](PayloadProxyInterface& data) {
-                auto entityRenderer = static_cast<EntityRenderer*>(&data);
-                entityRenderer->clearSubRenderItemIDs();
-            });
             emit DependencyManager::get<scriptable::ModelProviderFactory>()->
                 modelRemovedFromScene(entity->getEntityItemID(), NestableType::Entity, _model);
         }
@@ -1337,10 +1258,12 @@ void ModelEntityRenderer::doRenderUpdateSynchronousTyped(const ScenePointer& sce
 
     // Check for addition
     if (_hasModel && !model) {
-        model = std::make_shared<Model>(nullptr, entity.get());
+        model = std::make_shared<Model>(nullptr, entity.get(), _created);
         connect(model.get(), &Model::requestRenderUpdate, this, &ModelEntityRenderer::requestRenderUpdate);
         connect(model.get(), &Model::setURLFinished, this, [&](bool didVisualGeometryRequestSucceed) {
             setKey(didVisualGeometryRequestSucceed);
+            _model->setTagMask(getTagMask());
+            _model->setHifiRenderLayer(getHifiRenderLayer());
             emit requestRenderUpdate();
             if(didVisualGeometryRequestSucceed) {
                 emit DependencyManager::get<scriptable::ModelProviderFactory>()->
@@ -1396,15 +1319,14 @@ void ModelEntityRenderer::doRenderUpdateSynchronousTyped(const ScenePointer& sce
         entity->_originalTexturesRead = true;
     }
 
-    if (_lastTextures != entity->getTextures()) {
+    if (_textures != entity->getTextures()) {
+        QVariantMap newTextures;
         withWriteLock([&] {
             _texturesLoaded = false;
-            _lastTextures = entity->getTextures();
+            _textures = entity->getTextures();
+            newTextures = parseTexturesToMap(_textures, entity->_originalTextures);
         });
-        auto newTextures = parseTexturesToMap(_lastTextures, entity->_originalTextures);
-        if (newTextures != model->getTextures()) {
-            model->setTextures(newTextures);
-        }
+        model->setTextures(newTextures);
     }
     if (entity->_needsJointSimulation) {
         entity->copyAnimationJointDataToModel();
@@ -1414,6 +1336,10 @@ void ModelEntityRenderer::doRenderUpdateSynchronousTyped(const ScenePointer& sce
 
     if (model->isVisible() != _visible) {
         model->setVisibleInScene(_visible, scene);
+    }
+
+    if (model->isCauterized() != _cauterized) {
+        model->setCauterized(_cauterized, scene);
     }
 
     render::hifi::Tag tagMask = getTagMask();
@@ -1428,23 +1354,26 @@ void ModelEntityRenderer::doRenderUpdateSynchronousTyped(const ScenePointer& sce
     }
 
     {
+        bool groupCulled = entity->getGroupCulled();
+        if (model->isGroupCulled() != groupCulled) {
+            model->setGroupCulled(groupCulled);
+            setKey(_didLastVisualGeometryRequestSucceed);
+        }
+    }
+
+    {
         DETAILED_PROFILE_RANGE(simulation_physics, "Fixup");
         if (model->needsFixupInScene()) {
             model->removeFromScene(scene, transaction);
             render::Item::Status::Getters statusGetters;
             makeStatusGetters(entity, statusGetters);
             model->addToScene(scene, transaction, statusGetters);
-
-            auto newRenderItemIDs{ model->fetchRenderItemIDs() };
-            transaction.updateItem<PayloadProxyInterface>(getRenderItemID(), [newRenderItemIDs](PayloadProxyInterface& data) {
-                auto entityRenderer = static_cast<EntityRenderer*>(&data);
-                entityRenderer->setSubRenderItemIDs(newRenderItemIDs);
-            });
+            entity->bumpAncestorChainRenderableVersion();
             processMaterials();
         }
     }
 
-    if (!_texturesLoaded && model->getGeometry() && model->getGeometry()->areTexturesLoaded()) {
+    if (!_texturesLoaded && model->getNetworkModel() && model->getNetworkModel()->areTexturesLoaded()) {
         withWriteLock([&] {
             _texturesLoaded = true;
         });
@@ -1464,14 +1393,23 @@ void ModelEntityRenderer::doRenderUpdateSynchronousTyped(const ScenePointer& sce
     if (_animating) {
         DETAILED_PROFILE_RANGE(simulation_physics, "Animate");
 
-        if (!jointsMapped()) {
-            mapJoints(entity, model->getJointNames());
-        //else the joint have been mapped before but we have a new animation to load
-        } else if (_animation && (_animation->getURL().toString() != entity->getAnimationURL())) {
-            _jointMappingCompleted = false;
-            mapJoints(entity, model->getJointNames());
+        auto animationURL = entity->getAnimationURL();
+        bool animationChanged = _animationURL != animationURL;
+        if (animationChanged) {
+            _animationURL = animationURL;
+
+            if (_animation) {
+                //(_animation->getURL().toString() != entity->getAnimationURL())) { // bad check
+                // the joints have been mapped before but we have a new animation to load
+                _animation.reset();
+                _jointMappingCompleted = false;
+            }
         }
-        if (!(entity->getAnimationFirstFrame() < 0) && !(entity->getAnimationFirstFrame() > entity->getAnimationLastFrame())) {
+
+        if (!_jointMappingCompleted) {
+            mapJoints(entity, model);
+        }
+        if (entity->readyToAnimate()) {
             animate(entity);
         }
         emit requestRenderUpdate();
@@ -1481,6 +1419,32 @@ void ModelEntityRenderer::doRenderUpdateSynchronousTyped(const ScenePointer& sce
 void ModelEntityRenderer::setIsVisibleInSecondaryCamera(bool value) {
     Parent::setIsVisibleInSecondaryCamera(value);
     setKey(_didLastVisualGeometryRequestSucceed);
+    if (_model) {
+        _model->setTagMask(getTagMask());
+    }
+}
+
+void ModelEntityRenderer::setRenderLayer(RenderLayer value) {
+    Parent::setRenderLayer(value);
+    setKey(_didLastVisualGeometryRequestSucceed);
+    if (_model) {
+        _model->setHifiRenderLayer(getHifiRenderLayer());
+    }
+}
+
+void ModelEntityRenderer::setPrimitiveMode(PrimitiveMode value) {
+    Parent::setPrimitiveMode(value);
+    if (_model) {
+        _model->setPrimitiveMode(_primitiveMode);
+    }
+}
+
+void ModelEntityRenderer::setCullWithParent(bool value) {
+    Parent::setCullWithParent(value);
+    setKey(_didLastVisualGeometryRequestSucceed);
+    if (_model) {
+        _model->setCullWithParent(_cullWithParent);
+    }
 }
 
 // NOTE: this only renders the "meta" portion of the Model, namely it renders debugging items
@@ -1492,7 +1456,8 @@ void ModelEntityRenderer::doRender(RenderArgs* args) {
     static glm::vec4 greenColor(0.0f, 1.0f, 0.0f, 1.0f);
     gpu::Batch& batch = *args->_batch;
     batch.setModelTransform(getModelTransform()); // we want to include the scale as well
-    DependencyManager::get<GeometryCache>()->renderWireCubeInstance(args, batch, greenColor);
+    auto geometryCache = DependencyManager::get<GeometryCache>();
+    geometryCache->renderWireCubeInstance(args, batch, greenColor, geometryCache->getShapePipelinePointer(false, false, args->_renderMethod == Args::RenderMethod::FORWARD));
 
 #if WANT_EXTRA_DEBUGGING
     ModelPointer model;
@@ -1500,24 +1465,25 @@ void ModelEntityRenderer::doRender(RenderArgs* args) {
         model = _model;
     });
     if (model) {
-        model->renderDebugMeshBoxes(batch);
+        model->renderDebugMeshBoxes(batch, args->_renderMethod == Args::RenderMethod::FORWARD);
     }
 #endif
 }
 
-void ModelEntityRenderer::mapJoints(const TypedEntityPointer& entity, const QStringList& modelJointNames) {
+void ModelEntityRenderer::mapJoints(const TypedEntityPointer& entity, const ModelPointer& model) {
     // if we don't have animation, or we're already joint mapped then bail early
-    if (!entity->hasAnimation() || jointsMapped()) {
+    if (!entity->hasAnimation()) {
         return;
     }
 
-    if (!_animation || _animation->getURL().toString() != entity->getAnimationURL()) {
-        _animation = DependencyManager::get<AnimationCache>()->getAnimation(entity->getAnimationURL());
+    if (!_animation) {
+        _animation = DependencyManager::get<AnimationCache>()->getAnimation(_animationURL);
     }
 
     if (_animation && _animation->isLoaded()) {
         QStringList animationJointNames = _animation->getJointNames();
 
+        auto modelJointNames = model->getJointNames();
         if (modelJointNames.size() > 0 && animationJointNames.size() > 0) {
             _jointMapping.resize(modelJointNames.size());
             for (int i = 0; i < modelJointNames.size(); i++) {

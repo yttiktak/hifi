@@ -25,35 +25,31 @@
 #include "GLLogging.h"
 #include "Config.h"
 #include "GLHelpers.h"
+#include "QOpenGLContextWrapper.h"
+
+#if defined(GL_CUSTOM_CONTEXT)
+#include <QtPlatformHeaders/QWGLNativeContext>
+#endif
 
 using namespace gl;
 
+#if defined(GL_CUSTOM_CONTEXT)
+bool Context::USE_CUSTOM_CONTEXT { true };
+#endif
 
 bool Context::enableDebugLogger() {
-#if defined(DEBUG) || defined(USE_GLES)
-    static bool enableDebugLogger = true;
-#else
-    static const QString DEBUG_FLAG("HIFI_DEBUG_OPENGL");
-    static bool enableDebugLogger = QProcessEnvironment::systemEnvironment().contains(DEBUG_FLAG);
-#endif
-    static std::once_flag once;
-    std::call_once(once, [&] {
-        // If the previous run crashed, force GL debug logging on
-        if (qApp->property(hifi::properties::CRASHED).toBool()) {
-            enableDebugLogger = true;
-        }
-    });
-    return enableDebugLogger;
+    return gl::debugContextEnabled();
 }
-
-
 
 std::atomic<size_t> Context::_totalSwapchainMemoryUsage { 0 };
 
 size_t Context::getSwapchainMemoryUsage() { return _totalSwapchainMemoryUsage.load(); }
 
 size_t Context::evalSurfaceMemoryUsage(uint32_t width, uint32_t height, uint32_t pixelSize) {
-    return width * height * pixelSize;
+    size_t result = width;
+    result *= height;
+    result *= pixelSize;
+    return result;
 }
 
 void Context::updateSwapchainMemoryUsage(size_t prevSize, size_t newSize) {
@@ -68,8 +64,6 @@ void Context::updateSwapchainMemoryUsage(size_t prevSize, size_t newSize) {
 }
 
 
-Context* Context::PRIMARY = nullptr;
-
 Context::Context() {}
 
 Context::Context(QWindow* window) {
@@ -78,28 +72,25 @@ Context::Context(QWindow* window) {
 
 void Context::release() {
     doneCurrent();
-#ifdef GL_CUSTOM_CONTEXT
-    if (_wrappedContext) {
-        destroyContext(_wrappedContext);
-        _wrappedContext = nullptr;
+    if (_qglContext) {
+        destroyContext(_qglContext);
+        _qglContext = nullptr;
     }
+
+#ifdef GL_CUSTOM_CONTEXT
     if (_hglrc) {
-        destroyWin32Context(_hglrc);
+        wglDeleteContext(_hglrc);
         _hglrc = 0;
     }
+
     if (_hdc) {
         ReleaseDC(_hwnd, _hdc);
         _hdc = 0;
     }
     _hwnd = 0;
-#else
-    destroyContext(_context);
-    _context = nullptr;
 #endif
+
     _window = nullptr;
-    if (PRIMARY == this) {
-        PRIMARY = nullptr;
-    }
     updateSwapchainMemoryCounter();
 }
 
@@ -141,17 +132,8 @@ void Context::clear() {
 
 #if defined(GL_CUSTOM_CONTEXT)
 
-static void debugMessageCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam) {
-    if (GL_DEBUG_SEVERITY_NOTIFICATION == severity) {
-        return;
-    }
-    // FIXME For high severity errors, force a sync to the log, since we might crash
-    // before the log file was flushed otherwise.  Performance hit here
-    qCDebug(glLogging) << "OpenGL: " << message;
-}
-
 static void setupPixelFormatSimple(HDC hdc) {
-    // FIXME build the PFD based on the 
+    // FIXME build the PFD based on the
     static const PIXELFORMATDESCRIPTOR pfd =    // pfd Tells Windows How We Want Things To Be
     {
         sizeof(PIXELFORMATDESCRIPTOR),         // Size Of This Pixel Format Descriptor
@@ -183,26 +165,6 @@ static void setupPixelFormatSimple(HDC hdc) {
     }
 }
 
-void Context::destroyWin32Context(HGLRC hglrc) {
-    wglDeleteContext(hglrc);
-}
-
-bool Context::makeCurrent() {
-    BOOL result = wglMakeCurrent(_hdc, _hglrc);
-    assert(result);
-    updateSwapchainMemoryCounter();
-
-    return result;
-}
-
-void Context::swapBuffers() {
-    SwapBuffers(_hdc);
-}
-
-void Context::doneCurrent() {
-    wglMakeCurrent(0, 0);
-}
-
 // Pixel format arguments
 #define WGL_FRAMEBUFFER_SRGB_CAPABLE_ARB 0x20A9
 #define WGL_DRAW_TO_WINDOW_ARB 0x2001
@@ -221,6 +183,7 @@ void Context::doneCurrent() {
 #define WGL_CONTEXT_PROFILE_MASK_ARB 0x9126
 
 // Context create flag bits
+#define WGL_CONTEXT_ROBUST_ACCESS_BIT_ARB 0x00000004
 #define WGL_CONTEXT_DEBUG_BIT_ARB 0x00000001
 #define WGL_CONTEXT_CORE_PROFILE_BIT_ARB 0x00000001
 #define WGL_CONTEXT_ES2_PROFILE_BIT_EXT 0x00000004
@@ -235,16 +198,32 @@ typedef HGLRC(APIENTRYP PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC hDC, HGLRC hShare
 GLAPI PFNWGLCHOOSEPIXELFORMATARBPROC wglChoosePixelFormatARB;
 GLAPI PFNWGLCREATECONTEXTATTRIBSARBPROC wglCreateContextAttribsARB;
 
+#endif
 
-void Context::create() {
-    if (!PRIMARY) {
-        PRIMARY = static_cast<Context*>(qApp->property(hifi::properties::gl::PRIMARY_CONTEXT).value<void*>());
+
+Q_GUI_EXPORT QOpenGLContext *qt_gl_global_share_context();
+
+#if defined(GL_CUSTOM_CONTEXT)
+bool Context::makeCurrent() {
+    BOOL result = wglMakeCurrent(_hdc, _hglrc);
+    assert(result);
+    updateSwapchainMemoryCounter();
+    return result;
+}
+void Context::swapBuffers() {
+    SwapBuffers(_hdc);
+}
+void Context::doneCurrent() {
+    wglMakeCurrent(0, 0);
+}
+#endif
+
+void Context::create(QOpenGLContext* shareContext) {
+    if (!shareContext) {
+        shareContext = qt_gl_global_share_context();
     }
 
-    if (PRIMARY) {
-        _version = PRIMARY->_version;
-    }
-
+#if defined(GL_CUSTOM_CONTEXT)
     assert(0 != _hwnd);
     assert(0 == _hdc);
     auto hwnd = _hwnd;
@@ -263,112 +242,130 @@ void Context::create() {
         wglMakeCurrent(0, 0);
         wglDeleteContext(glrc);
         ReleaseDC(hwnd, hdc);
+        if (!wglChoosePixelFormatARB || !wglCreateContextAttribsARB) {
+            USE_CUSTOM_CONTEXT = false;
+        }
     });
 
-    _hdc = GetDC(_hwnd);
+    if (USE_CUSTOM_CONTEXT) {
+        _hdc = GetDC(_hwnd);
 #if defined(USE_GLES)
-    _version = 0x0200;
+        _version = 0x0302;
 #else
-    if (gl::disableGl45()) {
-        _version = 0x0401;
-    } else if (GLAD_GL_VERSION_4_5) {
-        _version = 0x0405;
-    } else if (GLAD_GL_VERSION_4_3) {
-        _version = 0x0403;
-    } else {
-        _version = 0x0401;
-    }
+        if (gl::disableGl45()) {
+            _version = 0x0401;
+        } else if (GLAD_GL_VERSION_4_5) {
+            _version = 0x0405;
+        } else if (GLAD_GL_VERSION_4_3) {
+            _version = 0x0403;
+        } else {
+            _version = 0x0401;
+        }
 #endif
 
-    static int pixelFormat = 0;
-    static PIXELFORMATDESCRIPTOR pfd;
-    if (!pixelFormat) {
-        memset(&pfd, 0, sizeof(pfd));
-        pfd.nSize = sizeof(pfd);
-        std::vector<int> formatAttribs;
-        formatAttribs.push_back(WGL_DRAW_TO_WINDOW_ARB);
-        formatAttribs.push_back(GL_TRUE);
-        formatAttribs.push_back(WGL_SUPPORT_OPENGL_ARB);
-        formatAttribs.push_back(GL_TRUE);
-        formatAttribs.push_back(WGL_DOUBLE_BUFFER_ARB);
-        formatAttribs.push_back(GL_TRUE);
-        formatAttribs.push_back(WGL_PIXEL_TYPE_ARB);
-        formatAttribs.push_back(WGL_TYPE_RGBA_ARB);
-        formatAttribs.push_back(WGL_COLOR_BITS_ARB);
-        formatAttribs.push_back(32);
-        formatAttribs.push_back(WGL_DEPTH_BITS_ARB);
-        formatAttribs.push_back(24);
-        formatAttribs.push_back(WGL_STENCIL_BITS_ARB);
-        formatAttribs.push_back(8);
+        static int pixelFormat = 0;
+        static PIXELFORMATDESCRIPTOR pfd;
+        if (!pixelFormat) {
+            memset(&pfd, 0, sizeof(pfd));
+            pfd.nSize = sizeof(pfd);
+            std::vector<int> formatAttribs;
+            formatAttribs.push_back(WGL_DRAW_TO_WINDOW_ARB);
+            formatAttribs.push_back(GL_TRUE);
+            formatAttribs.push_back(WGL_SUPPORT_OPENGL_ARB);
+            formatAttribs.push_back(GL_TRUE);
+            formatAttribs.push_back(WGL_DOUBLE_BUFFER_ARB);
+            formatAttribs.push_back(GL_TRUE);
+            formatAttribs.push_back(WGL_PIXEL_TYPE_ARB);
+            formatAttribs.push_back(WGL_TYPE_RGBA_ARB);
+            formatAttribs.push_back(WGL_COLOR_BITS_ARB);
+            formatAttribs.push_back(32);
+            formatAttribs.push_back(WGL_DEPTH_BITS_ARB);
+            formatAttribs.push_back(24);
+            formatAttribs.push_back(WGL_STENCIL_BITS_ARB);
+            formatAttribs.push_back(8);
 
 #ifdef NATIVE_SRGB_FRAMEBUFFER
-     //   formatAttribs.push_back(WGL_FRAMEBUFFER_SRGB_CAPABLE_ARB);
-     //   formatAttribs.push_back(GL_TRUE);
+            //   formatAttribs.push_back(WGL_FRAMEBUFFER_SRGB_CAPABLE_ARB);
+            //   formatAttribs.push_back(GL_TRUE);
 #endif
-        // terminate the list
-        formatAttribs.push_back(0);
-        UINT numFormats;
-        wglChoosePixelFormatARB(_hdc, &formatAttribs[0], NULL, 1, &pixelFormat, &numFormats);
-        DescribePixelFormat(_hdc, pixelFormat, sizeof(pfd), &pfd);
-    }
-    // The swap chain  pixel size for swap chains is : rgba32 + depth24stencil8
-    // We don't apply the length of the swap chain into this pixelSize since it is not vsible for the Process (on windows).
-    _swapchainPixelSize = 32 + 32;
-    updateSwapchainMemoryCounter();
-
-    SetPixelFormat(_hdc, pixelFormat, &pfd);
-    {
-        std::vector<int> contextAttribs;
-        uint32_t majorVersion = _version >> 8;
-        uint32_t minorVersion = _version & 0xFF;
-        contextAttribs.push_back(WGL_CONTEXT_MAJOR_VERSION_ARB);
-        contextAttribs.push_back(majorVersion);
-        contextAttribs.push_back(WGL_CONTEXT_MINOR_VERSION_ARB);
-        contextAttribs.push_back(minorVersion);
-        contextAttribs.push_back(WGL_CONTEXT_PROFILE_MASK_ARB);
-#if defined(USE_GLES)
-        contextAttribs.push_back(WGL_CONTEXT_ES2_PROFILE_BIT_EXT);
-#else
-        contextAttribs.push_back(WGL_CONTEXT_CORE_PROFILE_BIT_ARB);
-#endif
-        contextAttribs.push_back(WGL_CONTEXT_FLAGS_ARB);
-        if (enableDebugLogger()) {
-            contextAttribs.push_back(WGL_CONTEXT_DEBUG_BIT_ARB);
-        } else {
-            contextAttribs.push_back(0);
+            // terminate the list
+            formatAttribs.push_back(0);
+            UINT numFormats;
+            wglChoosePixelFormatARB(_hdc, &formatAttribs[0], NULL, 1, &pixelFormat, &numFormats);
+            DescribePixelFormat(_hdc, pixelFormat, sizeof(pfd), &pfd);
         }
-        contextAttribs.push_back(0);
-        auto shareHglrc = PRIMARY ? PRIMARY->_hglrc : 0;
-        _hglrc = wglCreateContextAttribsARB(_hdc, shareHglrc, &contextAttribs[0]);
+        // The swap chain  pixel size for swap chains is : rgba32 + depth24stencil8
+        // We don't apply the length of the swap chain into this pixelSize since it is not vsible for the Process (on windows).
+        _swapchainPixelSize = 32 + 32;
+
+        SetPixelFormat(_hdc, pixelFormat, &pfd);
+        {
+            std::vector<int> contextAttribs;
+            uint32_t majorVersion = _version >> 8;
+            uint32_t minorVersion = _version & 0xFF;
+            contextAttribs.push_back(WGL_CONTEXT_MAJOR_VERSION_ARB);
+            contextAttribs.push_back(majorVersion);
+            contextAttribs.push_back(WGL_CONTEXT_MINOR_VERSION_ARB);
+            contextAttribs.push_back(minorVersion);
+            contextAttribs.push_back(WGL_CONTEXT_PROFILE_MASK_ARB);
+#if defined(USE_GLES)
+            contextAttribs.push_back(WGL_CONTEXT_ES2_PROFILE_BIT_EXT);
+#else
+            contextAttribs.push_back(WGL_CONTEXT_CORE_PROFILE_BIT_ARB);
+#endif
+            {
+                int contextFlags = 0;
+                if (enableDebugLogger()) {
+                    contextFlags |= WGL_CONTEXT_DEBUG_BIT_ARB;
+                }
+#ifdef USE_KHR_ROBUSTNESS
+                contextFlags |= WGL_CONTEXT_ROBUST_ACCESS_BIT_ARB;
+#endif
+                if (contextFlags != 0) {
+                    contextAttribs.push_back(WGL_CONTEXT_FLAGS_ARB);
+                    contextAttribs.push_back(contextFlags);
+                }
+            }
+            contextAttribs.push_back(0);
+            HGLRC shareHglrc = nullptr;
+            if (shareContext) {
+                auto nativeContextPointer = QOpenGLContextWrapper(shareContext).getNativeContext();
+                shareHglrc = (HGLRC)nativeContextPointer->context();
+            }
+            _hglrc = wglCreateContextAttribsARB(_hdc, shareHglrc, &contextAttribs[0]);
+        }
+
+        if (_hglrc != 0) {
+            createWrapperContext();
+        }
     }
 
     if (_hglrc == 0) {
-        throw std::runtime_error("Could not create GL context");
+        // fallback, if the context creation failed, or USE_CUSTOM_CONTEXT is false
+        qtCreate(shareContext);
     }
+#else
+    // For platforms where we don't prefer custom context creation, always rely on the Qt context creation
+    qtCreate(shareContext);
+#endif
 
-    if (!PRIMARY) {
-        PRIMARY = this;
-        qApp->setProperty(hifi::properties::gl::PRIMARY_CONTEXT, QVariant::fromValue((void*)PRIMARY));
-    }
+    updateSwapchainMemoryCounter();
 
     if (!makeCurrent()) {
-        throw std::runtime_error("Could not make context current");
+        qCWarning(glLogging) << "Could not make context current";
+        return;
     }
     if (enableDebugLogger()) {
-        glDebugMessageCallback(debugMessageCallback, NULL);
-        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS_ARB);
+        setupDebugLogging(_qglContext);
     }
     doneCurrent();
 }
-
-#endif
-
 
 OffscreenContext::~OffscreenContext() {
     _window->deleteLater();
 }
 
-void OffscreenContext::create() {
+void OffscreenContext::create(QOpenGLContext* shareContext) {
     if (!_window) {
         _window = new QWindow();
         _window->setFlags(Qt::MSWindowsOwnDC);
@@ -379,5 +376,5 @@ void OffscreenContext::create() {
         qCDebug(glLogging) << "New Offscreen GLContext, window size = " << windowSize.width() << " , " << windowSize.height();
         QGuiApplication::processEvents();
     }
-    Parent::create();
+    Parent::create(shareContext);
 }

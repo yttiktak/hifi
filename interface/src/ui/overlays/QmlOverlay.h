@@ -9,10 +9,6 @@
 #ifndef hifi_QmlOverlay_h
 #define hifi_QmlOverlay_h
 
-#include <QString>
-#include <memory>
-
-#include <SharedUtil.h>
 #include "Overlay2D.h"
 
 class QQuickItem;
@@ -22,21 +18,18 @@ class QmlOverlay : public Overlay2D {
 
 public:
     QmlOverlay(const QUrl& url);
-    QmlOverlay(const QUrl& url, const QmlOverlay* textOverlay);
+    QmlOverlay(const QUrl& url, const QmlOverlay* overlay);
     ~QmlOverlay();
 
-    // Cannot fetch properties from QML based overlays due to race conditions
-    bool supportsGetProperty() const override { return false; }
-
     void setProperties(const QVariantMap& properties) override;
-    void render(RenderArgs* args) override;
+    void render(RenderArgs* args) override {}
 
 private:
     Q_INVOKABLE void qmlElementDestroyed();
     Q_INVOKABLE void buildQmlElement(const QUrl& url);
 
 protected:
-    QQuickItem* _qmlElement{ nullptr };
+    QQuickItem* _qmlElement { nullptr };
 };
 
 #endif // hifi_QmlOverlay_h

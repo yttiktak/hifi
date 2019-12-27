@@ -26,10 +26,9 @@ exports.handlers = {
             '../../assignment-client/src/octree',
             '../../interface/src',
             '../../interface/src/assets',
-            '../../interface/src/audio',
+            //'../../interface/src/audio', Exclude AudioScope API from output.
             '../../interface/src/avatar',
             '../../interface/src/commerce',
-            '../../interface/src/devices',
             '../../interface/src/java',
             '../../interface/src/networking',
             '../../interface/src/raypick',
@@ -48,19 +47,23 @@ exports.handlers = {
             '../../libraries/fbx/src',
             '../../libraries/graphics/src/graphics/',
             '../../libraries/graphics-scripting/src/graphics-scripting/',
+            '../../libraries/image/src/image',
             '../../libraries/input-plugins/src/input-plugins',
+            '../../libraries/material-networking/src/material-networking/',
             '../../libraries/midi/src',
             '../../libraries/model-networking/src/model-networking/',
             '../../libraries/networking/src',
             '../../libraries/octree/src',
             '../../libraries/physics/src',
+            '../../libraries/platform/src/platform/backend',
             '../../libraries/plugins/src/plugins',
+            '../../libraries/procedural/src/procedural',
             '../../libraries/pointers/src',
+            '../../libraries/render-utils/src',
             '../../libraries/script-engine/src',
             '../../libraries/shared/src',
             '../../libraries/shared/src/shared',
             '../../libraries/task/src/task',
-            '../../libraries/trackers/src/trackers',
             '../../libraries/ui/src',
             '../../libraries/ui/src/ui',
             '../../plugins/oculus/src',
@@ -107,6 +110,9 @@ exports.handlers = {
             if (e.doclet.hifiClientEntity) {
                 rows.push("Client Entity Scripts");
             }
+            if (e.doclet.hifiAvatar) {
+                rows.push("Avatar Scripts");
+            }
             if (e.doclet.hifiServerEntity) {
                 rows.push("Server Entity Scripts");
             }
@@ -114,11 +120,17 @@ exports.handlers = {
                 rows.push("Assignment Client Scripts");
             }
 
-            // Append an Available In: table at the end of the namespace description.
+            // Append an Available In: sentence at the beginning of the namespace description.
             if (rows.length > 0) {
-                var table = "<table><tr><th>Available in:</th><td>" + rows.join("</td><td>") + "</td></tr></table><br>";
-                e.doclet.description = table + (e.doclet.description ? e.doclet.description : "");
-            }
+                var availableIn = "<p class='availableIn'><b>Supported Script Types:</b> " + rows.join(" &bull; ") + "</p>";
+             
+                e.doclet.description = availableIn + (e.doclet.description ? e.doclet.description : "");
+            }            
+        }
+
+        if (e.doclet.kind === "function" && e.doclet.returns && e.doclet.returns[0].type
+                && e.doclet.returns[0].type.names[0] === "Signal") {
+            e.doclet.kind = "signal";
         }
     }
 };
@@ -140,6 +152,13 @@ exports.defineTags = function (dictionary) {
         }
     });
 
+    // @hifi-avatar-script
+    dictionary.defineTag("hifi-avatar", {
+        onTagged: function (doclet, tag) {
+            doclet.hifiAvatar = true;
+        }
+    });
+
     // @hifi-client-entity
     dictionary.defineTag("hifi-client-entity", {
         onTagged: function (doclet, tag) {
@@ -153,4 +172,5 @@ exports.defineTags = function (dictionary) {
             doclet.hifiServerEntity = true;
         }
     });
+
 };

@@ -21,6 +21,7 @@
 #include <QtCore/QUrl>
 #include <QtCore/QTextStream>
 #include <QtCore/QRegularExpression>
+#include <QtCore/QFileSelector>
 #include <QtGui/QDesktopServices>
 
 
@@ -30,8 +31,17 @@ const QStringList& FileUtils::getFileSelectors() {
     static std::once_flag once;
     static QStringList extraSelectors;
     std::call_once(once, [] {
+
+#if defined(Q_OS_ANDROID)
+        extraSelectors << "android_" HIFI_ANDROID_APP;
+#endif
+
 #if defined(USE_GLES)
         extraSelectors << "gles";
+#endif
+
+#ifndef Q_OS_ANDROID
+        extraSelectors << "webengine";
 #endif
     });
     return extraSelectors;
@@ -166,4 +176,16 @@ bool FileUtils::canCreateFile(const QString& fullPath) {
         }
     }
     return true;
+}
+
+QString FileUtils::getParentPath(const QString& fullPath) {
+    return QFileInfo(fullPath).absoluteDir().canonicalPath();
+}
+
+bool FileUtils::exists(const QString& fileName) {
+    return QFileInfo(fileName).exists();
+}
+
+bool FileUtils::isRelative(const QString& fileName) {
+    return QFileInfo(fileName).isRelative();
 }

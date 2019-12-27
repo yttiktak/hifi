@@ -23,7 +23,7 @@
 #define GPU_BINDLESS_TEXTURES 0
 
 namespace gpu { namespace gl45 {
-    
+
 using namespace gpu::gl;
 using TextureWeakPointer = std::weak_ptr<Texture>;
 
@@ -33,6 +33,7 @@ class GL45Backend : public GLBackend {
     friend class Context;
 
 public:
+    static const GLint RESOURCE_TRANSFER_TEX_UNIT { 32 };
     static GLint MAX_COMBINED_SHADER_STORAGE_BLOCKS;
     static GLint MAX_UNIFORM_LOCATIONS;
 #if GPU_BINDLESS_TEXTURES
@@ -56,6 +57,7 @@ public:
         using Parent = GLTexture;
         friend class GL45Backend;
         static GLuint allocate(const Texture& texture);
+
     protected:
         GL45Texture(const std::weak_ptr<GLBackend>& backend, const Texture& texture);
         void generateMips() const override;
@@ -88,6 +90,7 @@ public:
         virtual const Bindless& getBindless() const;
         void releaseBindless() const;
         void recreateBindless() const;
+
     private:
         mutable Bindless _bindless;
 #endif
@@ -98,10 +101,11 @@ public:
         mutable Sampler _cachedSampler{ getInvalidSampler() };
     };
 
-#if GPU_BINDLESS_TEXTURES 
+#if GPU_BINDLESS_TEXTURES
     class GL45TextureTable : public GLObject<TextureTable> {
         static GLuint allocate();
         using Parent = GLObject<TextureTable>;
+
     public:
         using BindlessArray = std::array<GL45Texture::Bindless, TextureTable::COUNT>;
 
@@ -115,7 +119,6 @@ public:
         BindlessArray _handles;
     };
 #endif
-
 
     //
     // Textures that have fixed allocation sizes and cannot be managed at runtime
@@ -134,12 +137,13 @@ public:
 
         void allocateStorage() const;
         void syncSampler() const override;
-        const Size _size { 0 };
+        const Size _size{ 0 };
     };
 
     class GL45AttachmentTexture : public GL45FixedAllocationTexture {
         using Parent = GL45FixedAllocationTexture;
         friend class GL45Backend;
+
     protected:
         GL45AttachmentTexture(const std::weak_ptr<GLBackend>& backend, const Texture& texture);
         ~GL45AttachmentTexture();
@@ -148,6 +152,7 @@ public:
     class GL45StrictResourceTexture : public GL45FixedAllocationTexture {
         using Parent = GL45FixedAllocationTexture;
         friend class GL45Backend;
+
     protected:
         GL45StrictResourceTexture(const std::weak_ptr<GLBackend>& backend, const Texture& texture);
         ~GL45StrictResourceTexture();
@@ -179,6 +184,7 @@ public:
     class GL45ResourceTexture : public GL45VariableAllocationTexture {
         using Parent = GL45VariableAllocationTexture;
         friend class GL45Backend;
+
     protected:
         GL45ResourceTexture(const std::weak_ptr<GLBackend>& backend, const Texture& texture);
 
@@ -186,7 +192,6 @@ public:
         size_t promote() override;
         size_t demote() override;
         void populateTransferQueue(TransferQueue& pendingTransfers) override;
-        
 
         void allocateStorage(uint16 mip);
         Size copyMipsFromTexture();
@@ -226,9 +231,9 @@ public:
     };
 #endif
 
-
 protected:
 
+    void draw(GLenum mode, uint32 numVertices, uint32 startVertex) override;
     void recycle() const override;
 
     GLuint getFramebufferID(const FramebufferPointer& framebuffer) override;
@@ -242,7 +247,6 @@ protected:
 
     GLuint getQueryID(const QueryPointer& query) override;
     GLQuery* syncGPUObject(const Query& query) override;
-
 
     // Draw Stage
     void do_draw(const Batch& batch, size_t paramOffset) override;
@@ -269,7 +273,7 @@ protected:
     void do_blit(const Batch& batch, size_t paramOffset) override;
 
     // Shader Stage
-    std::string getBackendShaderHeader() const override;
+    shader::Dialect getShaderDialect() const override;
 
     // Texture Management Stage
     void initTextureManagementStage() override;
@@ -281,9 +285,8 @@ protected:
 #endif
 };
 
-} }
+}}  // namespace gpu::gl45
 
 Q_DECLARE_LOGGING_CATEGORY(gpugl45logging)
 
 #endif
-

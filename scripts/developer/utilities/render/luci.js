@@ -1,132 +1,74 @@
-"use strict";
-
-//
-//  Luci.js
-//  tablet-engine app
-//
-//  Copyright 2017 High Fidelity, Inc.
-//
-//  Distributed under the Apache License, Version 2.0.
-//  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
-//
-
-(function() {
-    var TABLET_BUTTON_NAME = "LUCI";
-    var QMLAPP_URL = Script.resolvePath("./deferredLighting.qml");
-    var ICON_URL = Script.resolvePath("../../../system/assets/images/luci-i.svg");
-    var ACTIVE_ICON_URL = Script.resolvePath("../../../system/assets/images/luci-a.svg");
-
-   
-    var onLuciScreen = false;
-
-    function onClicked() {
-        if (onLuciScreen) {
-            tablet.gotoHomeScreen();
-        } else {
-            tablet.loadQMLSource(QMLAPP_URL);
-        }
-    }
-
-    var tablet = Tablet.getTablet("com.highfidelity.interface.tablet.system");
-    var button = tablet.addButton({
-        text: TABLET_BUTTON_NAME,
-        icon: ICON_URL,
-        activeIcon: ACTIVE_ICON_URL
-    });
-
-    var hasEventBridge = false;
-
-    function wireEventBridge(on) {
-        if (!tablet) {
-            print("Warning in wireEventBridge(): 'tablet' undefined!");
-            return;
-        }
-        if (on) {
-            if (!hasEventBridge) {
-                tablet.fromQml.connect(fromQml);
-                hasEventBridge = true;
-            }
-        } else {
-            if (hasEventBridge) {
-                tablet.fromQml.disconnect(fromQml);
-                hasEventBridge = false;
-            }
-        }
-    }
-
-    function onScreenChanged(type, url) {
-        if (url === QMLAPP_URL) {
-            onLuciScreen = true;
-        } else { 
-            onLuciScreen = false;
-        }
-        
-        button.editProperties({isActive: onLuciScreen});
-        wireEventBridge(onLuciScreen);
-    }
-        
-    button.clicked.connect(onClicked);
-    tablet.screenChanged.connect(onScreenChanged);
-
-    var moveDebugCursor = false;
-    Controller.mousePressEvent.connect(function (e) {
-        if (e.isMiddleButton) {
-            moveDebugCursor = true;
-            setDebugCursor(e.x, e.y);
-        }
-    });
-    Controller.mouseReleaseEvent.connect(function() { moveDebugCursor = false; });
-    Controller.mouseMoveEvent.connect(function (e) { if (moveDebugCursor) setDebugCursor(e.x, e.y); });
 
 
+var MaterialInspector = Script.require('./materialInspector.js');
 
-    function setDebugCursor(x, y) {
-        nx = 2.0 * (x / Window.innerWidth) - 1.0;
-        ny = 1.0 - 2.0 * ((y) / (Window.innerHeight));
+var Page = Script.require('../lib/skit/Page.js');
 
-         Render.getConfig("RenderMainView").getConfig("DebugDeferredBuffer").size = { x: nx, y: ny, z: 1.0, w: 1.0 };
-    }
 
+function openView() {
+    var pages = new Pages(Script.resolvePath("."));
 
     function fromQml(message) {
-        switch (message.method) {
-        case "openEngineView":
-            openEngineTaskView();
-            break;
-        }            
+        if (pages.open(message.method)) {
+            return;
+        }    
     }
 
+    var luciWindow  
+    function openLuciWindow(window) {
+        luciWindow = window;
 
-    var engineInspectorView = null 
-    function openEngineTaskView() {
-        if (engineInspectorView == null) {
-            var qml = Script.resolvePath('engineInspector.qml');
-            var window = new OverlayWindow({
-                title: 'Render Engine',
-                source: qml,
-                width: 300, 
-                height: 400
-            });
-            window.setPosition(200, 50);
-            engineInspectorView = window
-            window.closed.connect(function() { engineInspectorView = null; });
-        } else {
-            engineInspectorView.setPosition(200, 50);          
+
+        var moveDebugCursor = false;
+        var onMousePressEvent = function (e) {
+            if (e.isMiddleButton) {
+                moveDebugCursor = true;
+                setDebugCursor(e.x, e.y);
+            }
+        };
+        Controller.mousePressEvent.connect(onMousePressEvent);
+    
+        var onMouseReleaseEvent = function () {
+            moveDebugCursor = false;
+        };
+        Controller.mouseReleaseEvent.connect(onMouseReleaseEvent);
+    
+        var onMouseMoveEvent = function (e) {
+            if (moveDebugCursor) {
+                setDebugCursor(e.x, e.y);
+            }
+        };
+        Controller.mouseMoveEvent.connect(onMouseMoveEvent);
+    
+        function setDebugCursor(x, y) {
+            var nx = 2.0 * (x / Window.innerWidth) - 1.0;
+            var ny = 1.0 - 2.0 * ((y) / (Window.innerHeight));
+    
+            Render.getConfig("RenderMainView").getConfig("DebugDeferredBuffer").size = { x: nx, y: ny, z: 1.0, w: 1.0 };
         }
+
     }
 
+    function closeLuciWindow() {
+        luciWindow = {};
+
+        Controller.mousePressEvent.disconnect(onMousePressEvent);
+        Controller.mouseReleaseEvent.disconnect(onMouseReleaseEvent);
+        Controller.mouseMoveEvent.disconnect(onMouseMoveEvent);
+        pages.clear();
+    }
+
+    pages.addPage('Luci', 'Luci', 'luci.qml', 300, 420, fromQml, openLuciWindow, closeLuciWindow);
+    pages.addPage('openEngineInspectorView', 'Render Engine Inspector', 'engineInspector.qml', 300, 400);
+    pages.addPage('openEngineLODView', 'Render LOD', 'lod.qml', 300, 400);
+    pages.addPage('openMaterialInspectorView', 'Material Inspector', 'materialInspector.qml', 300, 400, null, MaterialInspector.setWindow, MaterialInspector.setWindow);
+
+    pages.open('Luci');
 
     
-    Script.scriptEnding.connect(function () {
-        if (onLuciScreen) {
-            tablet.gotoHomeScreen();
-        }
-        button.clicked.disconnect(onClicked);
-        tablet.screenChanged.disconnect(onScreenChanged);
-        tablet.removeButton(button);
+    return pages;
+}
 
-        if (engineInspectorView !== null) {
-            engineInspectorView.close()
-        }
-    });
-}()); 
+
+openView();
+

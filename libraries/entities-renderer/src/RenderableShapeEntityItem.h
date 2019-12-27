@@ -25,8 +25,8 @@ public:
     virtual scriptable::ScriptableModelBase getScriptableModel() override;
 
 protected:
-    ItemKey getKey() override;
     ShapeKey getShapeKey() override;
+    Item::Bound getBound() override;
 
 private:
     virtual bool needsRenderUpdate() const override;
@@ -36,12 +36,17 @@ private:
     virtual void doRender(RenderArgs* args) override;
     virtual bool isTransparent() const override;
 
-    bool useMaterialPipeline() const;
+    enum Pipeline { SIMPLE, MATERIAL, PROCEDURAL };
+    Pipeline getPipelineType(const graphics::MultiMaterial& materials) const;
 
-    Procedural _procedural;
-    QString _lastUserData;
+    QString _proceduralData;
     entity::Shape _shape { entity::Sphere };
-    std::shared_ptr<graphics::Material> _material;
+
+    PulsePropertyGroup _pulseProperties;
+    std::shared_ptr<graphics::ProceduralMaterial> _material { std::make_shared<graphics::ProceduralMaterial>() };
+    glm::vec3 _color { NAN };
+    float _alpha;
+
     glm::vec3 _position;
     glm::vec3 _dimensions;
     glm::quat _orientation;

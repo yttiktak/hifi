@@ -39,16 +39,18 @@
 #include "RenderUtilsLogging.h"
 #include <Trace.h>
 
+#include <BlendshapeConstants.h>
+
 using namespace std;
 
 int nakedModelPointerTypeId = qRegisterMetaType<ModelPointer>();
-int weakGeometryResourceBridgePointerTypeId = qRegisterMetaType<Geometry::WeakPointer>();
+int weakGeometryResourceBridgePointerTypeId = qRegisterMetaType<NetworkModel::WeakPointer>();
 int vec3VectorTypeId = qRegisterMetaType<QVector<glm::vec3>>();
 int normalTypeVecTypeId = qRegisterMetaType<QVector<NormalType>>("QVector<NormalType>");
 float Model::FAKE_DIMENSION_PLACEHOLDER = -1.0f;
 #define HTTP_INVALID_COM "http://invalid.com"
 
-Model::Model(QObject* parent, SpatiallyNestable* spatiallyNestableOverride) :
+Model::Model(QObject* parent, SpatiallyNestable* spatiallyNestableOverride, uint64_t created) :
     QObject(parent),
     _renderGeometry(),
     _renderWatcher(_renderGeometry),
@@ -62,10 +64,8 @@ Model::Model(QObject* parent, SpatiallyNestable* spatiallyNestableOverride) :
     _snapModelToRegistrationPoint(false),
     _snappedToRegistrationPoint(false),
     _url(HTTP_INVALID_COM),
-    _blendNumber(0),
-    _appliedBlendNumber(0),
-    _isWireframe(false),
-    _renderItemKeyGlobalFlags(render::ItemKey::Builder().withVisible().withTagBits(render::hifi::TAG_ALL_VIEWS).build())
+    _renderItemKeyGlobalFlags(render::ItemKey::Builder().withVisible().withTagBits(render::hifi::TAG_ALL_VIEWS).build()),
+    _created(created)
 {
     // we may have been created in the network thread, but we live in the main thread
     if (_viewState) {
@@ -74,7 +74,7 @@ Model::Model(QObject* parent, SpatiallyNestable* spatiallyNestableOverride) :
 
     setSnapModelToRegistrationPoint(true, glm::vec3(0.5f));
 
-    connect(&_renderWatcher, &GeometryResourceWatcher::finished, this, &Model::loadURLFinished);
+    connect(&_renderWatcher, &ModelResourceWatcher::finished, this, &Model::loadURLFinished);
 }
 
 Model::~Model() {
@@ -154,7 +154,7 @@ void Model::setOffset(const glm::vec3& offset) {
 }
 
 void Model::calculateTextureInfo() {
-    if (!_hasCalculatedTextureInfo && isLoaded() && getGeometry()->areTexturesLoaded() && !_modelMeshRenderItemsMap.isEmpty()) {
+    if (!_hasCalculatedTextureInfo && isLoaded() && getNetworkModel()->areTexturesLoaded() && !_modelMeshRenderItems.isEmpty()) {
         size_t textureSize = 0;
         int textureCount = 0;
         bool allTexturesLoaded = true;
@@ -181,15 +181,15 @@ int Model::getRenderInfoTextureCount() {
 }
 
 bool Model::shouldInvalidatePayloadShapeKey(int meshIndex) {
-    if (!getGeometry()) {
+    if (!getNetworkModel()) {
         return true;
     }
 
-    const FBXGeometry& geometry = getFBXGeometry();
-    const auto& networkMeshes = getGeometry()->getMeshes();
+    const HFMModel& hfmModel = getHFMModel();
+    const auto& networkMeshes = getNetworkModel()->getMeshes();
     // if our index is ever out of range for either meshes or networkMeshes, then skip it, and set our _meshGroupsKnown
     // to false to rebuild out mesh groups.
-    if (meshIndex < 0 || meshIndex >= (int)networkMeshes.size() || meshIndex >= (int)geometry.meshes.size() || meshIndex >= (int)_meshStates.size()) {
+    if (meshIndex < 0 || meshIndex >= (int)networkMeshes.size() || meshIndex >= (int)hfmModel.meshes.size()) {
         _needsFixupInScene = true;     // trigger remove/add cycle
         invalidCalculatedMeshBoxes();  // if we have to reload, we need to assume our mesh boxes are all invalid
         return true;
@@ -225,48 +225,51 @@ void Model::updateRenderItems() {
         Transform modelTransform = self->getTransform();
         modelTransform.setScale(glm::vec3(1.0f));
 
-        bool isWireframe = self->isWireframe();
+        PrimitiveMode primitiveMode = self->getPrimitiveMode();
         auto renderItemKeyGlobalFlags = self->getRenderItemKeyGlobalFlags();
+        bool cauterized = self->isCauterized();
 
         render::Transaction transaction;
         for (int i = 0; i < (int) self->_modelMeshRenderItemIDs.size(); i++) {
-
             auto itemID = self->_modelMeshRenderItemIDs[i];
-            auto meshIndex = self->_modelMeshRenderItemShapes[i].meshIndex;
 
-            const auto& meshState = self->getMeshState(meshIndex);
+            const auto& shapeState = self->getShapeState(i);
 
-            bool invalidatePayloadShapeKey = self->shouldInvalidatePayloadShapeKey(meshIndex);
-            bool useDualQuaternionSkinning = self->getUseDualQuaternionSkinning();
+            auto skinDeformerIndex = shapeState._skinDeformerIndex;
 
-            transaction.updateItem<ModelMeshPartPayload>(itemID, [modelTransform, meshState, useDualQuaternionSkinning,
-                                                                  invalidatePayloadShapeKey, isWireframe, renderItemKeyGlobalFlags](ModelMeshPartPayload& data) {
-                if (useDualQuaternionSkinning) {
-                    data.updateClusterBuffer(meshState.clusterDualQuaternions);
-                } else {
-                    data.updateClusterBuffer(meshState.clusterMatrices);
-                }
+            bool invalidatePayloadShapeKey = self->shouldInvalidatePayloadShapeKey(shapeState._meshIndex);
 
-                Transform renderTransform = modelTransform;
+            if (skinDeformerIndex != hfm::UNDEFINED_KEY) {
+                const auto& meshState = self->getMeshState(skinDeformerIndex);
+                bool useDualQuaternionSkinning = self->getUseDualQuaternionSkinning();
 
-                if (useDualQuaternionSkinning) {
-                    if (meshState.clusterDualQuaternions.size() == 1) {
-                        const auto& dq = meshState.clusterDualQuaternions[0];
-                        Transform transform(dq.getRotation(),
-                                            dq.getScale(),
-                                            dq.getTranslation());
-                        renderTransform = modelTransform.worldTransform(Transform(transform));
+                transaction.updateItem<ModelMeshPartPayload>(itemID, [modelTransform, shapeState, meshState, useDualQuaternionSkinning,
+                                                                      invalidatePayloadShapeKey, primitiveMode, renderItemKeyGlobalFlags, cauterized](ModelMeshPartPayload& data) {
+                    if (useDualQuaternionSkinning) {
+                        data.updateClusterBuffer(meshState.clusterDualQuaternions);
+                    } else {
+                        data.updateClusterBuffer(meshState.clusterMatrices);
                     }
-                } else {
-                    if (meshState.clusterMatrices.size() == 1) {
-                        renderTransform = modelTransform.worldTransform(Transform(meshState.clusterMatrices[0]));
-                    }
-                }
-                data.updateTransformForSkinnedMesh(renderTransform, modelTransform);
 
-                data.updateKey(renderItemKeyGlobalFlags);
-                data.setShapeKey(invalidatePayloadShapeKey, isWireframe, useDualQuaternionSkinning);
-            });
+                    Transform renderTransform = modelTransform;
+                    data.updateTransform(renderTransform);
+                    data.updateTransformAndBound(modelTransform.worldTransform(shapeState._rootFromJointTransform));
+
+                    data.setCauterized(cauterized);
+                    data.updateKey(renderItemKeyGlobalFlags);
+                    data.setShapeKey(invalidatePayloadShapeKey, primitiveMode, useDualQuaternionSkinning);
+                });
+            } else {
+                transaction.updateItem<ModelMeshPartPayload>(itemID, [modelTransform, shapeState, invalidatePayloadShapeKey, primitiveMode, renderItemKeyGlobalFlags](ModelMeshPartPayload& data) {
+                    
+                    Transform renderTransform = modelTransform;
+                    renderTransform = modelTransform.worldTransform(shapeState._rootFromJointTransform);
+                    data.updateTransform(renderTransform);
+
+                    data.updateKey(renderItemKeyGlobalFlags);
+                    data.setShapeKey(invalidatePayloadShapeKey, primitiveMode, false);
+                }); 
+            }
         }
 
         AbstractViewStateInterface::instance()->getMain3DScene()->enqueueTransaction(transaction);
@@ -278,12 +281,26 @@ void Model::setRenderItemsNeedUpdate() {
     emit requestRenderUpdate();
 }
 
+void Model::setPrimitiveMode(PrimitiveMode primitiveMode) {
+    _primitiveMode = primitiveMode;
+    setRenderItemsNeedUpdate();
+}
+
 void Model::reset() {
     if (isLoaded()) {
-        const FBXGeometry& geometry = getFBXGeometry();
-        _rig.reset(geometry);
+        const HFMModel& hfmModel = getHFMModel();
+        _rig.reset(hfmModel);
         emit rigReset();
         emit rigReady();
+    }
+}
+
+void Model::updateShapeStatesFromRig() {
+    for (auto& shape : _shapeStates) {
+        uint32_t jointId = shape._jointIndex;
+        if (jointId < (uint32_t) _rig.getJointStateCount()) {
+            shape._rootFromJointTransform = _rig.getJointTransform(jointId);
+        }
     }
 }
 
@@ -297,21 +314,32 @@ bool Model::updateGeometry() {
     _needsReload = false;
 
     // TODO: should all Models have a valid _rig?
-    if (_rig.jointStatesEmpty() && getFBXGeometry().joints.size() > 0) {
+    if (_rig.jointStatesEmpty() && getHFMModel().joints.size() > 0) {
         initJointStates();
         assert(_meshStates.empty());
 
-        const FBXGeometry& fbxGeometry = getFBXGeometry();
-        int i = 0;
-        foreach (const FBXMesh& mesh, fbxGeometry.meshes) {
-            MeshState state;
-            state.clusterDualQuaternions.resize(mesh.clusters.size());
-            state.clusterMatrices.resize(mesh.clusters.size());
-            _meshStates.push_back(state);
-            initializeBlendshapes(mesh, i);
-            i++;
+        const HFMModel& hfmModel = getHFMModel();
+
+        const auto& shapes = hfmModel.shapes;
+        _shapeStates.resize(shapes.size());
+        for (uint32_t s = 0; s < (uint32_t) shapes.size(); ++s) {
+            auto& shapeState = _shapeStates[s];
+            shapeState._jointIndex = shapes[s].joint;
+            shapeState._meshIndex = shapes[s].mesh;
+            shapeState._meshPartIndex = shapes[s].meshPart;
+            shapeState._skinDeformerIndex = shapes[s].skinDeformer;
         }
-        _blendshapeBuffersInitialized = true;
+        updateShapeStatesFromRig();
+
+        const auto& hfmSkinDeformers = hfmModel.skinDeformers;
+        for (uint32_t i = 0; i < (uint32_t) hfmSkinDeformers.size(); i++) {
+            const auto& dynT =  hfmSkinDeformers[i];
+            MeshState state;
+            state.clusterDualQuaternions.resize(dynT.clusters.size());
+            state.clusterMatrices.resize(dynT.clusters.size());
+            _meshStates.push_back(state);
+        }
+
         needFullUpdate = true;
         emit rigReady();
     }
@@ -321,10 +349,10 @@ bool Model::updateGeometry() {
 
 // virtual
 void Model::initJointStates() {
-    const FBXGeometry& geometry = getFBXGeometry();
+    const HFMModel& hfmModel = getHFMModel();
     glm::mat4 modelOffset = glm::scale(_scale) * glm::translate(_offset);
 
-    _rig.initJointStates(geometry, modelOffset);
+    _rig.initJointStates(hfmModel, modelOffset);
 }
 
 bool Model::findRayIntersectionAgainstSubMeshes(const glm::vec3& origin, const glm::vec3& direction, float& distance,
@@ -365,9 +393,9 @@ bool Model::findRayIntersectionAgainstSubMeshes(const glm::vec3& origin, const g
         int bestShapeID = 0;
         int bestSubMeshIndex = 0;
 
-        const FBXGeometry& geometry = getFBXGeometry();
+        const HFMModel& hfmModel = getHFMModel();
         if (!_triangleSetsValid) {
-            calculateTriangleSets(geometry);
+            calculateTriangleSets(hfmModel);
         }
 
         glm::mat4 meshToModelMatrix = glm::scale(_scale) * glm::translate(_offset);
@@ -440,6 +468,19 @@ bool Model::findRayIntersectionAgainstSubMeshes(const glm::vec3& origin, const g
             }
         }
 
+        /**jsdoc
+         * A submesh intersection point.
+         * @typedef {object} SubmeshIntersection
+         * @property {Vec3} worldIntersectionPoint - The intersection point in world coordinates.
+         * @property {Vec3} meshIntersectionPoint - The intersection point in model coordinates.
+         * @property {number} partIndex - The index of the intersected mesh part within the submesh.
+         * @property {number} shapeID - The index of the mesh part within the model.
+         * @property {number} subMeshIndex - The index of the intersected submesh within the model.
+         * @property {string} subMeshName - The name of the intersected submesh.
+         * @property {Triangle} subMeshTriangleWorld - The vertices of the intersected mesh part triangle in world coordinates.
+         * @property {Vec3} subMeshNormal - The normal of the intersected mesh part triangle in model coordinates.
+         * @property {Triangle} subMeshTriangle - The vertices of the intersected mesh part triangle in model coordinates.
+         */
         if (intersectedSomething) {
             distance = bestDistance;
             face = bestFace;
@@ -450,7 +491,7 @@ bool Model::findRayIntersectionAgainstSubMeshes(const glm::vec3& origin, const g
             extraInfo["shapeID"] = bestShapeID;
             if (pickAgainstTriangles) {
                 extraInfo["subMeshIndex"] = bestSubMeshIndex;
-                extraInfo["subMeshName"] = geometry.getModelNameOfMesh(bestSubMeshIndex);
+                extraInfo["subMeshName"] = hfmModel.getModelNameOfMesh(bestSubMeshIndex);
                 extraInfo["subMeshTriangleWorld"] = QVariantMap{
                     { "v0", vec3toVariant(bestWorldTriangle.v0) },
                     { "v1", vec3toVariant(bestWorldTriangle.v1) },
@@ -508,9 +549,9 @@ bool Model::findParabolaIntersectionAgainstSubMeshes(const glm::vec3& origin, co
         int bestShapeID = 0;
         int bestSubMeshIndex = 0;
 
-        const FBXGeometry& geometry = getFBXGeometry();
+        const HFMModel& hfmModel = getHFMModel();
         if (!_triangleSetsValid) {
-            calculateTriangleSets(geometry);
+            calculateTriangleSets(hfmModel);
         }
 
         glm::mat4 meshToModelMatrix = glm::scale(_scale) * glm::translate(_offset);
@@ -597,7 +638,7 @@ bool Model::findParabolaIntersectionAgainstSubMeshes(const glm::vec3& origin, co
             extraInfo["shapeID"] = bestShapeID;
             if (pickAgainstTriangles) {
                 extraInfo["subMeshIndex"] = bestSubMeshIndex;
-                extraInfo["subMeshName"] = geometry.getModelNameOfMesh(bestSubMeshIndex);
+                extraInfo["subMeshName"] = hfmModel.getModelNameOfMesh(bestSubMeshIndex);
                 extraInfo["subMeshTriangleWorld"] = QVariantMap{
                     { "v0", vec3toVariant(bestWorldTriangle.v0) },
                     { "v1", vec3toVariant(bestWorldTriangle.v1) },
@@ -616,65 +657,18 @@ bool Model::findParabolaIntersectionAgainstSubMeshes(const glm::vec3& origin, co
     return intersectedSomething;
 }
 
-bool Model::convexHullContains(glm::vec3 point) {
-    // if we aren't active, we can't compute that yet...
-    if (!isActive()) {
-        return false;
-    }
-
-    // extents is the entity relative, scaled, centered extents of the entity
-    glm::vec3 position = _translation;
-    glm::mat4 rotation = glm::mat4_cast(_rotation);
-    glm::mat4 translation = glm::translate(position);
-    glm::mat4 modelToWorldMatrix = translation * rotation;
-    glm::mat4 worldToModelMatrix = glm::inverse(modelToWorldMatrix);
-
-    Extents modelExtents = getMeshExtents(); // NOTE: unrotated
-
-    glm::vec3 dimensions = modelExtents.maximum - modelExtents.minimum;
-    glm::vec3 corner = -(dimensions * _registrationPoint);
-    AABox modelFrameBox(corner, dimensions);
-
-    glm::vec3 modelFramePoint = glm::vec3(worldToModelMatrix * glm::vec4(point, 1.0f));
-
-    // we can use the AABox's contains() by mapping our point into the model frame
-    // and testing there.
-    if (modelFrameBox.contains(modelFramePoint)){
-        QMutexLocker locker(&_mutex);
-
-        if (!_triangleSetsValid) {
-            calculateTriangleSets(getFBXGeometry());
-        }
-
-        // If we are inside the models box, then consider the submeshes...
-        glm::mat4 meshToModelMatrix = glm::scale(_scale) * glm::translate(_offset);
-        glm::mat4 meshToWorldMatrix = createMatFromQuatAndPos(_rotation, _translation) * meshToModelMatrix;
-        glm::mat4 worldToMeshMatrix = glm::inverse(meshToWorldMatrix);
-        glm::vec3 meshFramePoint = glm::vec3(worldToMeshMatrix * glm::vec4(point, 1.0f));
-
-        for (auto& meshTriangleSets : _modelSpaceMeshTriangleSets) {
-            for (auto &partTriangleSet : meshTriangleSets) {
-                const AABox& box = partTriangleSet.getBounds();
-                if (box.contains(meshFramePoint)) {
-                    if (partTriangleSet.convexHullContains(meshFramePoint)) {
-                        // It's inside this mesh, return true.
-                        return true;
-                    }
-                }
-            }
-        }
-
-
-    }
-    // It wasn't in any mesh, return false.
-    return false;
+glm::mat4 Model::getWorldToHFMMatrix() const {
+    glm::mat4 hfmToModelMatrix = glm::scale(_scale) * glm::translate(_offset);
+    glm::mat4 modelToWorldMatrix = createMatFromQuatAndPos(_rotation, _translation);
+    glm::mat4 worldToHFMMatrix = glm::inverse(modelToWorldMatrix * hfmToModelMatrix);
+    return worldToHFMMatrix;
 }
 
 // TODO: deprecate and remove
 MeshProxyList Model::getMeshes() const {
     MeshProxyList result;
-    const Geometry::Pointer& renderGeometry = getGeometry();
-    const Geometry::GeometryMeshes& meshes = renderGeometry->getMeshes();
+    const NetworkModel::Pointer& renderGeometry = getNetworkModel();
+    const NetworkModel::GeometryMeshes& meshes = renderGeometry->getMeshes();
 
     if (!isLoaded()) {
         return result;
@@ -743,9 +737,9 @@ bool Model::replaceScriptableModelMeshPart(scriptable::ScriptableModelBasePointe
         render::Transaction transaction;
         for (int i = 0; i < (int) _modelMeshRenderItemIDs.size(); i++) {
             auto itemID = _modelMeshRenderItemIDs[i];
-            auto shape = _modelMeshRenderItemShapes[i];
+            auto& shape = _shapeStates[i];
             // TODO: check to see if .partIndex matches too
-            if (shape.meshIndex == meshIndex) {
+            if (shape._meshIndex == (uint32_t) meshIndex) {
                 transaction.updateItem<ModelMeshPartPayload>(itemID, [=](ModelMeshPartPayload& data) {
                     data.updateMeshPart(mesh, partIndex);
                 });
@@ -755,29 +749,29 @@ bool Model::replaceScriptableModelMeshPart(scriptable::ScriptableModelBasePointe
     }
     // update triangles for picking
     {
-        FBXGeometry geometry;
+        HFMModel hfmModel;
         for (const auto& newMesh : meshes) {
-            FBXMesh mesh;
+            HFMMesh mesh;
             mesh._mesh = newMesh.getMeshPointer();
             mesh.vertices = buffer_helpers::mesh::attributeToVector<glm::vec3>(mesh._mesh, gpu::Stream::POSITION);
             int numParts = (int)newMesh.getMeshPointer()->getNumParts();
             for (int partID = 0; partID < numParts; partID++) {
-                FBXMeshPart part;
+                HFMMeshPart part;
                 part.triangleIndices = buffer_helpers::bufferToVector<int>(mesh._mesh->getIndexBuffer(), "part.triangleIndices");
-                mesh.parts << part;
+                mesh.parts.push_back(part);
             }
             {
                 foreach (const glm::vec3& vertex, mesh.vertices) {
                     glm::vec3 transformedVertex = glm::vec3(mesh.modelTransform * glm::vec4(vertex, 1.0f));
-                    geometry.meshExtents.minimum = glm::min(geometry.meshExtents.minimum, transformedVertex);
-                    geometry.meshExtents.maximum = glm::max(geometry.meshExtents.maximum, transformedVertex);
+                    hfmModel.meshExtents.minimum = glm::min(hfmModel.meshExtents.minimum, transformedVertex);
+                    hfmModel.meshExtents.maximum = glm::max(hfmModel.meshExtents.maximum, transformedVertex);
                     mesh.meshExtents.minimum = glm::min(mesh.meshExtents.minimum, transformedVertex);
                     mesh.meshExtents.maximum = glm::max(mesh.meshExtents.maximum, transformedVertex);
                 }
             }
-            geometry.meshes << mesh;
+            hfmModel.meshes.push_back(mesh);
         }
-        calculateTriangleSets(geometry);
+        calculateTriangleSets(hfmModel);
     }
     return true;
 }
@@ -791,17 +785,29 @@ scriptable::ScriptableModelBase Model::getScriptableModel() {
         return result;
     }
 
-    const FBXGeometry& geometry = getFBXGeometry();
-    int numberOfMeshes = geometry.meshes.size();
+    const HFMModel& hfmModel = getHFMModel();
+    uint32_t numberOfMeshes = (uint32_t)hfmModel.meshes.size();
     int shapeID = 0;
-    for (int i = 0; i < numberOfMeshes; i++) {
-        const FBXMesh& fbxMesh = geometry.meshes.at(i);
-        if (auto mesh = fbxMesh._mesh) {
+    for (uint32_t i = 0; i < numberOfMeshes; i++) {
+        const HFMMesh& hfmMesh = hfmModel.meshes.at(i);
+        if (auto mesh = hfmMesh._mesh) {
             result.append(mesh);
 
             int numParts = (int)mesh->getNumParts();
             for (int partIndex = 0; partIndex < numParts; partIndex++) {
-                result.appendMaterial(graphics::MaterialLayer(getGeometry()->getShapeMaterial(shapeID), 0), shapeID, _modelMeshMaterialNames[shapeID]);
+                auto& materialName = _modelMeshMaterialNames[shapeID];
+                result.appendMaterial(graphics::MaterialLayer(getNetworkModel()->getShapeMaterial(shapeID), 0), shapeID, materialName);
+
+                {
+                    std::unique_lock<std::mutex> lock(_materialMappingMutex);
+                    auto mappedMaterialIter = _materialMapping.find(shapeID);
+                    if (mappedMaterialIter != _materialMapping.end()) {
+                        auto mappedMaterials = mappedMaterialIter->second;
+                        for (auto& mappedMaterial : mappedMaterials) {
+                            result.appendMaterial(mappedMaterial, shapeID, materialName);
+                        }
+                    }
+                }
                 shapeID++;
             }
         }
@@ -810,80 +816,72 @@ scriptable::ScriptableModelBase Model::getScriptableModel() {
     return result;
 }
 
-void Model::calculateTriangleSets(const FBXGeometry& geometry) {
+void Model::calculateTriangleSets(const HFMModel& hfmModel) {
     PROFILE_RANGE(render, __FUNCTION__);
 
-    int numberOfMeshes = geometry.meshes.size();
+    uint32_t meshInstanceCount = 0;
+    uint32_t lastMeshForInstanceCount = hfm::UNDEFINED_KEY;
+    for (const auto& shape : hfmModel.shapes) {
+        if (shape.mesh != lastMeshForInstanceCount) {
+            ++meshInstanceCount;
+        }
+        lastMeshForInstanceCount = shape.mesh;
+    }
 
     _triangleSetsValid = true;
     _modelSpaceMeshTriangleSets.clear();
-    _modelSpaceMeshTriangleSets.resize(numberOfMeshes);
+    _modelSpaceMeshTriangleSets.reserve(meshInstanceCount);
 
-    for (int i = 0; i < numberOfMeshes; i++) {
-        const FBXMesh& mesh = geometry.meshes.at(i);
+    uint32_t lastMeshForTriangleBuilding = hfm::UNDEFINED_KEY;
+    glm::mat4 lastTransformForTriangleBuilding { 0 };
+    std::vector<glm::vec3> transformedPoints;
+    for (const auto& shape : hfmModel.shapes) {
+        const uint32_t meshIndex = shape.mesh;
+        const hfm::Mesh& mesh = hfmModel.meshes.at(meshIndex);
+        const auto& triangleListMesh = mesh.triangleListMesh;
+        const glm::vec2 part = triangleListMesh.parts[shape.meshPart];
+        glm::mat4 worldFromMeshTransform;
+        if (shape.joint != hfm::UNDEFINED_KEY) {
+            // globalTransform includes hfmModel.offset, 
+            // which includes the scaling, rotation, and translation specified by the FST,
+            // and the scaling from the unit conversion in FBX.
+            // This can't change at runtime, so we can safely store these in our TriangleSet.
+            worldFromMeshTransform = hfmModel.joints[shape.joint].globalTransform;
+        }
 
-        const int numberOfParts = mesh.parts.size();
-        auto& meshTriangleSets = _modelSpaceMeshTriangleSets[i];
-        meshTriangleSets.resize(numberOfParts);
+        if (meshIndex != lastMeshForTriangleBuilding || worldFromMeshTransform != lastTransformForTriangleBuilding) {
+            lastMeshForTriangleBuilding = meshIndex;
+            lastTransformForTriangleBuilding = worldFromMeshTransform;
+            _modelSpaceMeshTriangleSets.emplace_back();
+            _modelSpaceMeshTriangleSets.back().reserve(mesh.parts.size());
 
-        for (int j = 0; j < numberOfParts; j++) {
-            const FBXMeshPart& part = mesh.parts.at(j);
-
-            auto& partTriangleSet = meshTriangleSets[j];
-
-            const int INDICES_PER_TRIANGLE = 3;
-            const int INDICES_PER_QUAD = 4;
-            const int TRIANGLES_PER_QUAD = 2;
-
-            // tell our triangleSet how many triangles to expect.
-            int numberOfQuads = part.quadIndices.size() / INDICES_PER_QUAD;
-            int numberOfTris = part.triangleIndices.size() / INDICES_PER_TRIANGLE;
-            int totalTriangles = (numberOfQuads * TRIANGLES_PER_QUAD) + numberOfTris;
-            partTriangleSet.reserve(totalTriangles);
-
-            auto meshTransform = geometry.offset * mesh.modelTransform;
-
-            if (part.quadIndices.size() > 0) {
-                int vIndex = 0;
-                for (int q = 0; q < numberOfQuads; q++) {
-                    int i0 = part.quadIndices[vIndex++];
-                    int i1 = part.quadIndices[vIndex++];
-                    int i2 = part.quadIndices[vIndex++];
-                    int i3 = part.quadIndices[vIndex++];
-
-                    // track the model space version... these points will be transformed by the FST's offset, 
-                    // which includes the scaling, rotation, and translation specified by the FST/FBX, 
-                    // this can't change at runtime, so we can safely store these in our TriangleSet
-                    glm::vec3 v0 = glm::vec3(meshTransform * glm::vec4(mesh.vertices[i0], 1.0f));
-                    glm::vec3 v1 = glm::vec3(meshTransform * glm::vec4(mesh.vertices[i1], 1.0f));
-                    glm::vec3 v2 = glm::vec3(meshTransform * glm::vec4(mesh.vertices[i2], 1.0f));
-                    glm::vec3 v3 = glm::vec3(meshTransform * glm::vec4(mesh.vertices[i3], 1.0f));
-
-                    Triangle tri1 = { v0, v1, v3 };
-                    Triangle tri2 = { v1, v2, v3 };
-                    partTriangleSet.insert(tri1);
-                    partTriangleSet.insert(tri2);
+            transformedPoints = triangleListMesh.vertices;
+            if (worldFromMeshTransform != glm::mat4()) {
+                for (auto& point : transformedPoints) {
+                    point = glm::vec3(worldFromMeshTransform * glm::vec4(point, 1.0f));
                 }
             }
+        }
+        auto& meshTriangleSets = _modelSpaceMeshTriangleSets.back();
+        meshTriangleSets.emplace_back();
+        auto& partTriangleSet = meshTriangleSets.back();
 
-            if (part.triangleIndices.size() > 0) {
-                int vIndex = 0;
-                for (int t = 0; t < numberOfTris; t++) {
-                    int i0 = part.triangleIndices[vIndex++];
-                    int i1 = part.triangleIndices[vIndex++];
-                    int i2 = part.triangleIndices[vIndex++];
+        const static size_t INDICES_PER_TRIANGLE = 3;
+        const size_t triangleCount = (size_t)(part.y) / INDICES_PER_TRIANGLE;
+        partTriangleSet.reserve(triangleCount);
+        const size_t indexStart = (uint32_t)part.x;
+        const size_t indexEnd = indexStart + (triangleCount * INDICES_PER_TRIANGLE);
+        for (size_t i = indexStart; i < indexEnd; i += INDICES_PER_TRIANGLE) {
+            const int i0 = triangleListMesh.indices[i];
+            const int i1 = triangleListMesh.indices[i + 1];
+            const int i2 = triangleListMesh.indices[i + 2];
 
-                    // track the model space version... these points will be transformed by the FST's offset, 
-                    // which includes the scaling, rotation, and translation specified by the FST/FBX, 
-                    // this can't change at runtime, so we can safely store these in our TriangleSet
-                    glm::vec3 v0 = glm::vec3(meshTransform * glm::vec4(mesh.vertices[i0], 1.0f));
-                    glm::vec3 v1 = glm::vec3(meshTransform * glm::vec4(mesh.vertices[i1], 1.0f));
-                    glm::vec3 v2 = glm::vec3(meshTransform * glm::vec4(mesh.vertices[i2], 1.0f));
+            const glm::vec3 v0 = transformedPoints[i0];
+            const glm::vec3 v1 = transformedPoints[i1];
+            const glm::vec3 v2 = transformedPoints[i2];
 
-                    Triangle tri = { v0, v1, v2 };
-                    partTriangleSet.insert(tri);
-                }
-            }
+            const Triangle tri = { v0, v1, v2 };
+            partTriangleSet.insert(tri);
         }
     }
 }
@@ -895,8 +893,8 @@ void Model::updateRenderItemsKey(const render::ScenePointer& scene) {
     }
     auto renderItemsKey = _renderItemKeyGlobalFlags;
     render::Transaction transaction;
-    foreach(auto item, _modelMeshRenderItemsMap.keys()) {
-        transaction.updateItem<ModelMeshPartPayload>(item, [renderItemsKey](ModelMeshPartPayload& data) {
+    for(auto itemID: _modelMeshRenderItemIDs) {
+        transaction.updateItem<ModelMeshPartPayload>(itemID, [renderItemsKey](ModelMeshPartPayload& data) {
             data.updateKey(renderItemsKey);
         });
     }
@@ -927,28 +925,12 @@ bool Model::canCastShadow() const {
     return _renderItemKeyGlobalFlags.isShadowCaster();
 }
 
-void Model::setLayeredInFront(bool layeredInFront, const render::ScenePointer& scene) {
-    if (Model::isLayeredInFront() != layeredInFront) {
+void Model::setHifiRenderLayer(render::hifi::Layer renderLayer, const render::ScenePointer& scene) {
+    if (_renderItemKeyGlobalFlags.getLayer() != renderLayer) {
         auto keyBuilder = render::ItemKey::Builder(_renderItemKeyGlobalFlags);
-        _renderItemKeyGlobalFlags = (layeredInFront ? keyBuilder.withLayer(render::hifi::LAYER_3D_FRONT) : keyBuilder.withoutLayer());
+        _renderItemKeyGlobalFlags = keyBuilder.withLayer(renderLayer);
         updateRenderItemsKey(scene);
     }
-}
-
-bool Model::isLayeredInFront() const {
-    return _renderItemKeyGlobalFlags.isLayer(render::hifi::LAYER_3D_FRONT);
-}
-
-void Model::setLayeredInHUD(bool layeredInHUD, const render::ScenePointer& scene) {
-    if (Model::isLayeredInHUD() != layeredInHUD) {
-        auto keyBuilder = render::ItemKey::Builder(_renderItemKeyGlobalFlags);
-        _renderItemKeyGlobalFlags = (layeredInHUD ? keyBuilder.withLayer(render::hifi::LAYER_3D_HUD) : keyBuilder.withoutLayer());
-        updateRenderItemsKey(scene);
-    }
-}
-
-bool Model::isLayeredInHUD() const {
-    return _renderItemKeyGlobalFlags.isLayer(render::hifi::LAYER_3D_HUD);
 }
 
 void Model::setTagMask(uint8_t mask, const render::ScenePointer& scene) {
@@ -969,8 +951,42 @@ void Model::setGroupCulled(bool groupCulled, const render::ScenePointer& scene) 
         updateRenderItemsKey(scene);
     }
 }
+
 bool Model::isGroupCulled() const {
     return _renderItemKeyGlobalFlags.isSubMetaCulled();
+}
+
+void Model::setCauterized(bool cauterized, const render::ScenePointer& scene) {
+    if (Model::isCauterized() != cauterized) {
+        _cauterized = cauterized;
+        if (!scene) {
+            _needsFixupInScene = true;
+            return;
+        }
+        render::Transaction transaction;
+        for (auto itemID : _modelMeshRenderItemIDs) {
+            transaction.updateItem<ModelMeshPartPayload>(itemID, [cauterized](ModelMeshPartPayload& data) {
+                data.setCauterized(cauterized);
+            });
+        }
+        scene->enqueueTransaction(transaction);
+    }
+}
+
+void Model::setCullWithParent(bool cullWithParent) {
+    if (_cullWithParent != cullWithParent) {
+        _cullWithParent = cullWithParent;
+
+        render::Transaction transaction;
+        auto renderItemsKey = _renderItemKeyGlobalFlags;
+        for(auto item : _modelMeshRenderItemIDs) {
+            transaction.updateItem<ModelMeshPartPayload>(item, [cullWithParent, renderItemsKey](ModelMeshPartPayload& data) {
+                data.setCullWithParent(cullWithParent);
+                data.updateKey(renderItemsKey);
+            });
+        }
+        AbstractViewStateInterface::instance()->getMain3DScene()->enqueueTransaction(transaction);
+    }
 }
 
 const render::ItemKey Model::getRenderItemKeyGlobalFlags() const {
@@ -979,41 +995,45 @@ const render::ItemKey Model::getRenderItemKeyGlobalFlags() const {
 
 bool Model::addToScene(const render::ScenePointer& scene,
                        render::Transaction& transaction,
-                       render::Item::Status::Getters& statusGetters) {
+                       render::Item::Status::Getters& statusGetters,
+                       BlendShapeOperator modelBlendshapeOperator) {
+
     if (!_addedToScene && isLoaded()) {
+        updateGeometry();
         updateClusterMatrices();
         if (_modelMeshRenderItems.empty()) {
             createRenderItemSet();
         }
     }
 
+    _modelBlendshapeOperator = modelBlendshapeOperator;
+
     bool somethingAdded = false;
 
-    if (_modelMeshRenderItemsMap.empty()) {
-
+    if (_modelMeshRenderItemIDs.empty()) {
         bool hasTransparent = false;
         size_t verticesCount = 0;
         foreach(auto renderItem, _modelMeshRenderItems) {
             auto item = scene->allocateID();
             auto renderPayload = std::make_shared<ModelMeshPartPayload::Payload>(renderItem);
-            if (_modelMeshRenderItemsMap.empty() && statusGetters.size()) {
+            if (_modelMeshRenderItemIDs.empty() && statusGetters.size()) {
                 renderPayload->addStatusGetters(statusGetters);
             }
             transaction.resetItem(item, renderPayload);
 
             hasTransparent = hasTransparent || renderItem.get()->getShapeKey().isTranslucent();
             verticesCount += renderItem.get()->getVerticesCount();
-            _modelMeshRenderItemsMap.insert(item, renderPayload);
             _modelMeshRenderItemIDs.emplace_back(item);
         }
-        somethingAdded = !_modelMeshRenderItemsMap.empty();
+        somethingAdded = !_modelMeshRenderItemIDs.empty();
 
         _renderInfoVertexCount = verticesCount;
-        _renderInfoDrawCalls = _modelMeshRenderItemsMap.count();
+        _renderInfoDrawCalls = (uint32_t) _modelMeshRenderItemIDs.size();
         _renderInfoHasTransparent = hasTransparent;
     }
 
     if (somethingAdded) {
+        applyMaterialMapping();
         _addedToScene = true;
         updateRenderItems();
         _needsFixupInScene = false;
@@ -1023,18 +1043,13 @@ bool Model::addToScene(const render::ScenePointer& scene,
 }
 
 void Model::removeFromScene(const render::ScenePointer& scene, render::Transaction& transaction) {
-    foreach (auto item, _modelMeshRenderItemsMap.keys()) {
-        transaction.removeItem(item);
+    for (auto itemID: _modelMeshRenderItemIDs) {
+        transaction.removeItem(itemID);
     }
     _modelMeshRenderItemIDs.clear();
-    _modelMeshRenderItemsMap.clear();
     _modelMeshRenderItems.clear();
     _modelMeshMaterialNames.clear();
-    _modelMeshRenderItemShapes.clear();
-
-    _blendshapeBuffers.clear();
-    _blendshapeOffsets.clear();
-    _blendshapeBuffersInitialized = false;
+    _priorityMap.clear();
 
     _addedToScene = false;
 
@@ -1044,7 +1059,7 @@ void Model::removeFromScene(const render::ScenePointer& scene, render::Transacti
     _renderInfoHasTransparent = false;
 }
 
-void Model::renderDebugMeshBoxes(gpu::Batch& batch) {
+void Model::renderDebugMeshBoxes(gpu::Batch& batch, bool forward) {
     int colorNdx = 0;
     _mutex.lock();
 
@@ -1053,7 +1068,7 @@ void Model::renderDebugMeshBoxes(gpu::Batch& batch) {
     Transform meshToWorld(meshToWorldMatrix);
     batch.setModelTransform(meshToWorld);
 
-    DependencyManager::get<GeometryCache>()->bindSimpleProgram(batch, false, false, false, true, true);
+    DependencyManager::get<GeometryCache>()->bindSimpleProgram(batch, false, false, true, true, forward, graphics::MaterialKey::CULL_NONE);
 
     for (auto& meshTriangleSets : _modelSpaceMeshTriangleSets) {
         for (auto &partTriangleSet : meshTriangleSets) {
@@ -1115,7 +1130,7 @@ Extents Model::getBindExtents() const {
     if (!isActive()) {
         return Extents();
     }
-    const Extents& bindExtents = getFBXGeometry().bindExtents;
+    const Extents& bindExtents = getHFMModel().bindExtents;
     Extents scaledExtents = { bindExtents.minimum * _scale, bindExtents.maximum * _scale };
     return scaledExtents;
 }
@@ -1129,12 +1144,12 @@ Extents Model::getMeshExtents() const {
     if (!isActive()) {
         return Extents();
     }
-    const Extents& extents = getFBXGeometry().meshExtents;
+    const Extents& extents = getHFMModel().meshExtents;
 
     // even though our caller asked for "unscaled" we need to include any fst scaling, translation, and rotation, which
     // is captured in the offset matrix
-    glm::vec3 minimum = glm::vec3(getFBXGeometry().offset * glm::vec4(extents.minimum, 1.0f));
-    glm::vec3 maximum = glm::vec3(getFBXGeometry().offset * glm::vec4(extents.maximum, 1.0f));
+    glm::vec3 minimum = glm::vec3(getHFMModel().offset * glm::vec4(extents.minimum, 1.0f));
+    glm::vec3 maximum = glm::vec3(getHFMModel().offset * glm::vec4(extents.maximum, 1.0f));
     Extents scaledExtents = { minimum * _scale, maximum * _scale };
     return scaledExtents;
 }
@@ -1144,12 +1159,12 @@ Extents Model::getUnscaledMeshExtents() const {
         return Extents();
     }
 
-    const Extents& extents = getFBXGeometry().meshExtents;
+    const Extents& extents = getHFMModel().meshExtents;
 
     // even though our caller asked for "unscaled" we need to include any fst scaling, translation, and rotation, which
     // is captured in the offset matrix
-    glm::vec3 minimum = glm::vec3(getFBXGeometry().offset * glm::vec4(extents.minimum, 1.0f));
-    glm::vec3 maximum = glm::vec3(getFBXGeometry().offset * glm::vec4(extents.maximum, 1.0f));
+    glm::vec3 minimum = glm::vec3(getHFMModel().offset * glm::vec4(extents.minimum, 1.0f));
+    glm::vec3 maximum = glm::vec3(getHFMModel().offset * glm::vec4(extents.maximum, 1.0f));
     Extents scaledExtents = { minimum, maximum };
 
     return scaledExtents;
@@ -1172,18 +1187,14 @@ void Model::setJointTranslation(int index, bool valid, const glm::vec3& translat
 }
 
 int Model::getParentJointIndex(int jointIndex) const {
-    return (isActive() && jointIndex != -1) ? getFBXGeometry().joints.at(jointIndex).parentIndex : -1;
-}
-
-int Model::getLastFreeJointIndex(int jointIndex) const {
-    return (isActive() && jointIndex != -1) ? getFBXGeometry().joints.at(jointIndex).freeLineage.last() : -1;
+    return (isActive() && jointIndex != -1) ? getHFMModel().joints.at(jointIndex).parentIndex : -1;
 }
 
 void Model::setTextures(const QVariantMap& textures) {
     if (isLoaded()) {
-        _pendingTextures.clear();
         _needsFixupInScene = true;
         _renderGeometry->setTextures(textures);
+        _pendingTextures.clear();
     } else {
         _pendingTextures = textures;
     }
@@ -1216,11 +1227,12 @@ void Model::setURL(const QUrl& url) {
     invalidCalculatedMeshBoxes();
     deleteGeometry();
 
-    auto resource = DependencyManager::get<ModelCache>()->getGeometryResource(url);
+    auto resource = DependencyManager::get<ModelCache>()->getModelResource(url);
     if (resource) {
         resource->setLoadPriority(this, _loadingPriority);
         _renderWatcher.setResource(resource);
     }
+    _rig.initFlow(false);
     onInvalidate();
 }
 
@@ -1276,7 +1288,7 @@ QStringList Model::getJointNames() const {
             Q_RETURN_ARG(QStringList, result));
         return result;
     }
-    return isActive() ? getFBXGeometry().getJointNames() : QStringList();
+    return isActive() ? getHFMModel().getJointNames() : QStringList();
 }
 
 void Model::setScaleToFit(bool scaleToFit, const glm::vec3& dimensions, bool forceRescale) {
@@ -1340,6 +1352,8 @@ void Model::scaleToFit() {
     // size is our "target size in world space"
     // we need to set our model scale so that the extents of the mesh, fit in a box that size...
     glm::vec3 meshDimensions = modelMeshExtents.maximum - modelMeshExtents.minimum;
+    const glm::vec3 MIN_MESH_DIMENSIONS { 1.0e-6f };  // one micrometer
+    meshDimensions = glm::max(meshDimensions, MIN_MESH_DIMENSIONS);
     glm::vec3 rescaleDimensions = _scaleToFitDimensions / meshDimensions;
     setScaleInternal(rescaleDimensions);
     _scaledToFit = true;
@@ -1384,8 +1398,6 @@ void Model::simulate(float deltaTime, bool fullUpdate) {
         // update the world space transforms for all joints
         glm::mat4 parentTransform = glm::scale(_scale) * glm::translate(_offset);
         updateRig(deltaTime, parentTransform);
-
-        computeMeshPartLocalBounds();
     }
 }
 
@@ -1396,17 +1408,6 @@ void Model::updateRig(float deltaTime, glm::mat4 parentTransform) {
     _rig.updateAnimations(deltaTime, parentTransform, rigToWorldTransform);
 }
 
-void Model::computeMeshPartLocalBounds() {
-    for (auto& part : _modelMeshRenderItems) {
-        const Model::MeshState& state = _meshStates.at(part->_meshIndex);
-        if (_useDualQuaternionSkinning) {
-            part->computeAdjustedLocalBound(state.clusterDualQuaternions);
-        } else {
-            part->computeAdjustedLocalBound(state.clusterMatrices);
-        }
-    }
-}
-
 // virtual
 void Model::updateClusterMatrices() {
     DETAILED_PERFORMANCE_TIMER("Model::updateClusterMatrices");
@@ -1415,29 +1416,32 @@ void Model::updateClusterMatrices() {
         return;
     }
 
+    updateShapeStatesFromRig();
+
     _needsUpdateClusterMatrices = false;
-    const FBXGeometry& geometry = getFBXGeometry();
-    for (int i = 0; i < (int) _meshStates.size(); i++) {
-        MeshState& state = _meshStates[i];
-        const FBXMesh& mesh = geometry.meshes.at(i);
-        for (int j = 0; j < mesh.clusters.size(); j++) {
-            const FBXCluster& cluster = mesh.clusters.at(j);
+
+    for (int skinDeformerIndex = 0; skinDeformerIndex < (int)_meshStates.size(); skinDeformerIndex++) {
+        MeshState& state = _meshStates[skinDeformerIndex];
+        auto numClusters = state.getNumClusters();
+        for (uint32_t clusterIndex = 0; clusterIndex < numClusters; clusterIndex++) {
+            const auto& cbmov = _rig.getAnimSkeleton()->getClusterBindMatricesOriginalValues(skinDeformerIndex, clusterIndex);
+
             if (_useDualQuaternionSkinning) {
-                auto jointPose = _rig.getJointPose(cluster.jointIndex);
+                auto jointPose = _rig.getJointPose(cbmov.jointIndex);
                 Transform jointTransform(jointPose.rot(), jointPose.scale(), jointPose.trans());
                 Transform clusterTransform;
-                Transform::mult(clusterTransform, jointTransform, cluster.inverseBindTransform);
-                state.clusterDualQuaternions[j] = Model::TransformDualQuaternion(clusterTransform);
+                Transform::mult(clusterTransform, jointTransform, cbmov.inverseBindTransform);
+                state.clusterDualQuaternions[clusterIndex] = Model::TransformDualQuaternion(clusterTransform);
             } else {
-                auto jointMatrix = _rig.getJointTransform(cluster.jointIndex);
-                glm_mat4u_mul(jointMatrix, cluster.inverseBindMatrix, state.clusterMatrices[j]);
+                auto jointMatrix = _rig.getJointTransform(cbmov.jointIndex);
+                glm_mat4u_mul(jointMatrix, cbmov.inverseBindMatrix, state.clusterMatrices[clusterIndex]);
             }
         }
     }
 
     // post the blender if we're not currently waiting for one to finish
     auto modelBlender = DependencyManager::get<ModelBlender>();
-    if (_blendshapeBuffersInitialized && modelBlender->shouldComputeBlendshapes() && geometry.hasBlendedMeshes() && _blendshapeCoefficients != _blendedBlendshapeCoefficients) {
+    if (modelBlender->shouldComputeBlendshapes() && getHFMModel().hasBlendedMeshes() && _blendshapeCoefficients != _blendedBlendshapeCoefficients) {
         _blendedBlendshapeCoefficients = _blendshapeCoefficients;
         modelBlender->noteRequiresBlend(getThisPointer());
     }
@@ -1445,9 +1449,7 @@ void Model::updateClusterMatrices() {
 
 void Model::deleteGeometry() {
     _deleteGeometryCounter++;
-    _blendshapeBuffers.clear();
-    _blendshapeOffsets.clear();
-    _blendshapeBuffersInitialized = false;
+    _shapeStates.clear();
     _meshStates.clear();
     _rig.destroyAnimGraph();
     _blendedBlendshapeCoefficients.clear();
@@ -1481,20 +1483,12 @@ const render::ItemIDs& Model::fetchRenderItemIDs() const {
 
 void Model::createRenderItemSet() {
     assert(isLoaded());
-    const auto& meshes = _renderGeometry->getMeshes();
-
-    // all of our mesh vectors must match in size
-    if (meshes.size() != _meshStates.size()) {
-        qCDebug(renderutils) << "WARNING!!!! Mesh Sizes don't match! " << meshes.size() << _meshStates.size() << " We will not segregate mesh groups yet.";
-        return;
-    }
 
     // We should not have any existing renderItems if we enter this section of code
     Q_ASSERT(_modelMeshRenderItems.isEmpty());
 
     _modelMeshRenderItems.clear();
     _modelMeshMaterialNames.clear();
-    _modelMeshRenderItemShapes.clear();
 
     Transform transform;
     transform.setTranslation(_translation);
@@ -1505,71 +1499,173 @@ void Model::createRenderItemSet() {
     offset.postTranslate(_offset);
 
     // Run through all of the meshes, and place them into their segregated, but unsorted buckets
-    int shapeID = 0;
-    uint32_t numMeshes = (uint32_t)meshes.size();
-    auto& fbxGeometry = getFBXGeometry();
-    for (uint32_t i = 0; i < numMeshes; i++) {
-        const auto& mesh = meshes.at(i);
-        if (!mesh) {
-            continue;
-        }
+    const auto& shapes = _renderGeometry->getHFMModel().shapes;
+    for (uint32_t shapeID = 0; shapeID < shapes.size(); shapeID++) {
+        const auto& shape = shapes[shapeID];
 
-        // Create the render payloads
-        int numParts = (int)mesh->getNumParts();
-        for (int partIndex = 0; partIndex < numParts; partIndex++) {
-            initializeBlendshapes(fbxGeometry.meshes[i], i);
-            _modelMeshRenderItems << std::make_shared<ModelMeshPartPayload>(shared_from_this(), i, partIndex, shapeID, transform, offset);
-            auto material = getGeometry()->getShapeMaterial(shapeID);
-            _modelMeshMaterialNames.push_back(material ? material->getName() : "");
-            _modelMeshRenderItemShapes.emplace_back(ShapeInfo{ (int)i });
-            shapeID++;
-        }
+        _modelMeshRenderItems << std::make_shared<ModelMeshPartPayload>(shared_from_this(), shape.mesh, shape.meshPart, shapeID, transform, offset, _created);
+
+        auto material = getNetworkModel()->getShapeMaterial(shapeID);
+        _modelMeshMaterialNames.push_back(material ? material->getName() : "");
     }
-    _blendshapeBuffersInitialized = true;
 }
 
 bool Model::isRenderable() const {
-    return !_meshStates.empty() || (isLoaded() && _renderGeometry->getMeshes().empty());
+    return (!_shapeStates.empty()) || (isLoaded() && _renderGeometry->getMeshes().empty());
 }
 
-std::vector<unsigned int> Model::getMeshIDsFromMaterialID(QString parentMaterialName) {
-    // try to find all meshes with materials that match parentMaterialName as a string
-    // if none, return parentMaterialName as a uint
-    std::vector<unsigned int> toReturn;
-    const QString MATERIAL_NAME_PREFIX = "mat::";
-    if (parentMaterialName.startsWith(MATERIAL_NAME_PREFIX)) {
-        parentMaterialName.replace(0, MATERIAL_NAME_PREFIX.size(), QString(""));
-        for (unsigned int i = 0; i < (unsigned int)_modelMeshMaterialNames.size(); i++) {
-            if (_modelMeshMaterialNames[i] == parentMaterialName.toStdString()) {
-                toReturn.push_back(i);
-            }
-        }
-    }
+std::set<unsigned int> Model::getMeshIDsFromMaterialID(QString parentMaterialName) {
+    std::set<unsigned int> toReturn;
 
-    if (toReturn.empty()) {
-        toReturn.push_back(parentMaterialName.toUInt());
+    const QString all("all");
+    if (parentMaterialName == all) {
+        for (unsigned int i = 0; i < (unsigned int)_modelMeshRenderItemIDs.size(); i++) {
+            toReturn.insert(i);
+        }
+    } else if (!parentMaterialName.isEmpty()) {
+        auto parseFunc = [this, &toReturn] (QString& target) {
+            if (target.isEmpty()) {
+                return;
+            }
+            // if target starts with "mat::", try to find all meshes with materials that match target as a string
+            // otherwise, return target as a uint
+            const QString MATERIAL_NAME_PREFIX("mat::");
+            if (target.startsWith(MATERIAL_NAME_PREFIX)) {
+                std::string targetStdString = target.replace(0, MATERIAL_NAME_PREFIX.size(), "").toStdString();
+                for (unsigned int i = 0; i < (unsigned int)_modelMeshMaterialNames.size(); i++) {
+                    if (_modelMeshMaterialNames[i] == targetStdString) {
+                        toReturn.insert(i);
+                    }
+                }
+                return;
+            }
+            toReturn.insert(target.toUInt());
+        };
+
+        if (parentMaterialName.length() > 2 && parentMaterialName.startsWith("[") && parentMaterialName.endsWith("]")) {
+            QStringList list = parentMaterialName.split(",", QString::SkipEmptyParts);
+            for (int i = 0; i < list.length(); i++) {
+                auto& target = list[i];
+                if (i == 0) {
+                    target = target.replace(0, 1, "");
+                }
+                if (i == list.length() - 1) {
+                    target = target.replace(target.length() - 1, 1, "");
+                }
+                parseFunc(target);
+            }
+        } else {
+            parseFunc(parentMaterialName);
+        }
     }
 
     return toReturn;
 }
 
+void Model::applyMaterialMapping() {
+    auto renderItemsKey = _renderItemKeyGlobalFlags;
+    PrimitiveMode primitiveMode = getPrimitiveMode();
+    bool useDualQuaternionSkinning = _useDualQuaternionSkinning;
+    auto modelMeshRenderItemIDs = _modelMeshRenderItemIDs;
+    auto shapeStates = _shapeStates;
+    std::unordered_map<int, bool> shouldInvalidatePayloadShapeKeyMap;
+
+    for (auto& shape : _shapeStates) {
+        shouldInvalidatePayloadShapeKeyMap[shape._meshIndex] = shouldInvalidatePayloadShapeKey(shape._meshIndex);
+    }
+
+    auto& materialMapping = getMaterialMapping();
+    for (auto& mapping : materialMapping) {
+        auto networkMaterialResource = mapping.second;
+        if (!networkMaterialResource) {
+            continue;
+        }
+
+        std::set<unsigned int> shapeIDs = getMeshIDsFromMaterialID(QString(mapping.first.c_str()));
+        if (shapeIDs.size() == 0) {
+            continue;
+        }
+
+        // This needs to be precomputed before the lambda, since the lambdas could be called out of order
+        std::unordered_map<unsigned int, quint16> priorityMapPerResource;
+        for (auto shapeID : shapeIDs) {
+            priorityMapPerResource[shapeID] = ++_priorityMap[shapeID];
+        }
+
+        std::weak_ptr<Model> weakSelf = shared_from_this();
+        auto materialLoaded = [networkMaterialResource, shapeIDs, priorityMapPerResource, renderItemsKey, primitiveMode, useDualQuaternionSkinning,
+                modelMeshRenderItemIDs, shapeStates, shouldInvalidatePayloadShapeKeyMap, weakSelf]() {
+            std::shared_ptr<Model> self = weakSelf.lock();
+            if (!self || networkMaterialResource->isFailed() || networkMaterialResource->parsedMaterials.names.size() == 0) {
+                return;
+            }
+            render::Transaction transaction;
+            std::shared_ptr<NetworkMaterial> networkMaterial;
+            {
+                QString url = networkMaterialResource->getURL().toString();
+                bool foundMaterialName = false;
+                if (url.contains("#")) {
+                    auto split = url.split("#");
+                    std::string materialName = split.last().toStdString();
+                    auto networkMaterialIter = networkMaterialResource->parsedMaterials.networkMaterials.find(materialName);
+                    if (networkMaterialIter != networkMaterialResource->parsedMaterials.networkMaterials.end()) {
+                        networkMaterial = networkMaterialIter->second;
+                        foundMaterialName = true;
+                    }
+                }
+                if (!foundMaterialName) {
+                    networkMaterial = networkMaterialResource->parsedMaterials.networkMaterials[networkMaterialResource->parsedMaterials.names[0]];
+                }
+            }
+            for (auto shapeID : shapeIDs) {
+                if (shapeID < modelMeshRenderItemIDs.size()) {
+                    auto itemID = modelMeshRenderItemIDs[shapeID];
+                    auto meshIndex = shapeStates[shapeID]._meshIndex;
+                    bool invalidatePayloadShapeKey = shouldInvalidatePayloadShapeKeyMap.at(meshIndex);
+                    graphics::MaterialLayer material = graphics::MaterialLayer(networkMaterial, priorityMapPerResource.at(shapeID));
+                    {
+                        std::unique_lock<std::mutex> lock(self->_materialMappingMutex);
+                        self->_materialMapping[shapeID].push_back(material);
+                    }
+                    transaction.updateItem<ModelMeshPartPayload>(itemID, [material, renderItemsKey,
+                            invalidatePayloadShapeKey, primitiveMode, useDualQuaternionSkinning](ModelMeshPartPayload& data) {
+                        data.addMaterial(material);
+                        // if the material changed, we might need to update our item key or shape key
+                        data.updateKey(renderItemsKey);
+                        data.setShapeKey(invalidatePayloadShapeKey, primitiveMode, useDualQuaternionSkinning);
+                    });
+                }
+            }
+            AbstractViewStateInterface::instance()->getMain3DScene()->enqueueTransaction(transaction);
+        };
+
+        if (networkMaterialResource->isLoaded()) {
+            materialLoaded();
+        } else {
+            connect(networkMaterialResource.data(), &Resource::finished, materialLoaded);
+        }
+    }
+}
+
 void Model::addMaterial(graphics::MaterialLayer material, const std::string& parentMaterialName) {
-    std::vector<unsigned int> shapeIDs = getMeshIDsFromMaterialID(QString(parentMaterialName.c_str()));
+    std::set<unsigned int> shapeIDs = getMeshIDsFromMaterialID(QString(parentMaterialName.c_str()));
+
+    auto renderItemsKey = _renderItemKeyGlobalFlags;
+    PrimitiveMode primitiveMode = getPrimitiveMode();
+    bool useDualQuaternionSkinning = _useDualQuaternionSkinning;
+
     render::Transaction transaction;
     for (auto shapeID : shapeIDs) {
         if (shapeID < _modelMeshRenderItemIDs.size()) {
             auto itemID = _modelMeshRenderItemIDs[shapeID];
-            auto renderItemsKey = _renderItemKeyGlobalFlags;
-            bool wireframe = isWireframe();
-            auto meshIndex = _modelMeshRenderItemShapes[shapeID].meshIndex;
+            auto meshIndex = _shapeStates[shapeID]._meshIndex;
             bool invalidatePayloadShapeKey = shouldInvalidatePayloadShapeKey(meshIndex);
-            bool useDualQuaternionSkinning = _useDualQuaternionSkinning;
             transaction.updateItem<ModelMeshPartPayload>(itemID, [material, renderItemsKey,
-                invalidatePayloadShapeKey, wireframe, useDualQuaternionSkinning](ModelMeshPartPayload& data) {
+                invalidatePayloadShapeKey, primitiveMode, useDualQuaternionSkinning](ModelMeshPartPayload& data) {
                 data.addMaterial(material);
                 // if the material changed, we might need to update our item key or shape key
                 data.updateKey(renderItemsKey);
-                data.setShapeKey(invalidatePayloadShapeKey, wireframe, useDualQuaternionSkinning);
+                data.setShapeKey(invalidatePayloadShapeKey, primitiveMode, useDualQuaternionSkinning);
             });
         }
     }
@@ -1577,46 +1673,42 @@ void Model::addMaterial(graphics::MaterialLayer material, const std::string& par
 }
 
 void Model::removeMaterial(graphics::MaterialPointer material, const std::string& parentMaterialName) {
-    std::vector<unsigned int> shapeIDs = getMeshIDsFromMaterialID(QString(parentMaterialName.c_str()));
+    std::set<unsigned int> shapeIDs = getMeshIDsFromMaterialID(QString(parentMaterialName.c_str()));
     render::Transaction transaction;
     for (auto shapeID : shapeIDs) {
         if (shapeID < _modelMeshRenderItemIDs.size()) {
             auto itemID = _modelMeshRenderItemIDs[shapeID];
             auto renderItemsKey = _renderItemKeyGlobalFlags;
-            bool wireframe = isWireframe();
-            auto meshIndex = _modelMeshRenderItemShapes[shapeID].meshIndex;
+            PrimitiveMode primitiveMode = getPrimitiveMode();
+            auto meshIndex = _shapeStates[shapeID]._meshIndex;
             bool invalidatePayloadShapeKey = shouldInvalidatePayloadShapeKey(meshIndex);
             bool useDualQuaternionSkinning = _useDualQuaternionSkinning;
             transaction.updateItem<ModelMeshPartPayload>(itemID, [material, renderItemsKey,
-                invalidatePayloadShapeKey, wireframe, useDualQuaternionSkinning](ModelMeshPartPayload& data) {
+                invalidatePayloadShapeKey, primitiveMode, useDualQuaternionSkinning](ModelMeshPartPayload& data) {
                 data.removeMaterial(material);
                 // if the material changed, we might need to update our item key or shape key
                 data.updateKey(renderItemsKey);
-                data.setShapeKey(invalidatePayloadShapeKey, wireframe, useDualQuaternionSkinning);
+                data.setShapeKey(invalidatePayloadShapeKey, primitiveMode, useDualQuaternionSkinning);
             });
         }
     }
     AbstractViewStateInterface::instance()->getMain3DScene()->enqueueTransaction(transaction);
 }
 
-class CollisionRenderGeometry : public Geometry {
+class CollisionRenderGeometry : public NetworkModel {
 public:
     CollisionRenderGeometry(graphics::MeshPointer mesh) {
-        _fbxGeometry = std::make_shared<FBXGeometry>();
+        _hfmModel = std::make_shared<HFMModel>();
         std::shared_ptr<GeometryMeshes> meshes = std::make_shared<GeometryMeshes>();
         meshes->push_back(mesh);
         _meshes = meshes;
-        _meshParts = std::shared_ptr<const GeometryMeshParts>();
     }
 };
 
-
-using packBlendshapeOffsetTo = void(glm::uvec4& packed, const BlendshapeOffsetUnpacked& unpacked);
-
-void packBlendshapeOffsetTo_Pos_F32_3xSN10_Nor_3xSN10_Tan_3xSN10(glm::uvec4& packed, const BlendshapeOffsetUnpacked& unpacked) {
+static void packBlendshapeOffsetTo_Pos_F32_3xSN10_Nor_3xSN10_Tan_3xSN10(glm::uvec4& packed, const BlendshapeOffsetUnpacked& unpacked) {
     float len = glm::compMax(glm::abs(unpacked.positionOffset));
     glm::vec3 normalizedPos(unpacked.positionOffset);
-    if (len > 1.0f) {
+    if (len > 0.0f) {
         normalizedPos /= len;
     } else {
         len = 1.0f;
@@ -1624,143 +1716,147 @@ void packBlendshapeOffsetTo_Pos_F32_3xSN10_Nor_3xSN10_Tan_3xSN10(glm::uvec4& pac
 
     packed = glm::uvec4(
         glm::floatBitsToUint(len),
-        glm::packSnorm3x10_1x2(glm::vec4(normalizedPos, 0.0f)),
-        glm::packSnorm3x10_1x2(glm::vec4(unpacked.normalOffset, 0.0f)),
-        glm::packSnorm3x10_1x2(glm::vec4(unpacked.tangentOffset, 0.0f))
+        glm_packSnorm3x10_1x2(glm::vec4(normalizedPos, 0.0f)),
+        glm_packSnorm3x10_1x2(glm::vec4(unpacked.normalOffset, 0.0f)),
+        glm_packSnorm3x10_1x2(glm::vec4(unpacked.tangentOffset, 0.0f))
     );
 }
+
+static void packBlendshapeOffsets_ref(BlendshapeOffsetUnpacked* unpacked, BlendshapeOffsetPacked* packed, int size) {
+    for (int i = 0; i < size; ++i) {
+        packBlendshapeOffsetTo_Pos_F32_3xSN10_Nor_3xSN10_Tan_3xSN10((*packed).packedPosNorTan, (*unpacked));
+        ++unpacked;
+        ++packed;
+    }
+}
+
+#if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
+//
+// Runtime CPU dispatch
+//
+#include <CPUDetect.h>
+
+void packBlendshapeOffsets_AVX2(float (*unpacked)[9], uint32_t (*packed)[4], int size);
+
+static void packBlendshapeOffsets(BlendshapeOffsetUnpacked* unpacked, BlendshapeOffsetPacked* packed, int size) {
+    static bool _cpuSupportsAVX2 = cpuSupportsAVX2();
+    if (_cpuSupportsAVX2) {
+        static_assert(sizeof(BlendshapeOffsetUnpacked) == 9 * sizeof(float), "struct BlendshapeOffsetUnpacked size doesn't match.");
+        static_assert(sizeof(BlendshapeOffsetPacked) == 4 * sizeof(uint32_t), "struct BlendshapeOffsetPacked size doesn't match.");
+        packBlendshapeOffsets_AVX2((float(*)[9])unpacked, (uint32_t(*)[4])packed, size);
+    } else {
+        packBlendshapeOffsets_ref(unpacked, packed, size);
+    }
+}
+
+#else   // portable reference code
+static auto& packBlendshapeOffsets = packBlendshapeOffsets_ref;
+#endif
 
 class Blender : public QRunnable {
 public:
 
-    Blender(ModelPointer model, int blendNumber, const Geometry::WeakPointer& geometry, const QVector<float>& blendshapeCoefficients);
+    Blender(ModelPointer model, HFMModel::ConstPointer hfmModel, int blendNumber, const QVector<float>& blendshapeCoefficients);
 
     virtual void run() override;
 
 private:
-
     ModelPointer _model;
+    HFMModel::ConstPointer _hfmModel;
     int _blendNumber;
-    Geometry::WeakPointer _geometry;
     QVector<float> _blendshapeCoefficients;
 };
 
-Blender::Blender(ModelPointer model, int blendNumber, const Geometry::WeakPointer& geometry, const QVector<float>& blendshapeCoefficients) :
+Blender::Blender(ModelPointer model, HFMModel::ConstPointer hfmModel, int blendNumber, const QVector<float>& blendshapeCoefficients) :
     _model(model),
+    _hfmModel(hfmModel),
     _blendNumber(blendNumber),
-    _geometry(geometry),
     _blendshapeCoefficients(blendshapeCoefficients) {
 }
 
 void Blender::run() {
-    QVector<BlendshapeOffset> blendshapeOffsets;
-    if (_model && _model->isLoaded()) {
-        DETAILED_PROFILE_RANGE_EX(simulation_animation, __FUNCTION__, 0xFFFF0000, 0, { { "url", _model->getURL().toString() } });
-        int offset = 0;
-        auto meshes = _model->getFBXGeometry().meshes;
-        int meshIndex = 0;
-        foreach(const FBXMesh& mesh, meshes) {
-            auto modelMeshBlendshapeOffsets = _model->_blendshapeOffsets.find(meshIndex++);
-            if (mesh.blendshapes.isEmpty() || modelMeshBlendshapeOffsets == _model->_blendshapeOffsets.end()) {
+    DETAILED_PROFILE_RANGE_EX(simulation_animation, __FUNCTION__, 0xFFFF0000, 0, { { "url", _model->getURL().toString() } });
+    int numBlendshapeOffsets = 0;  // number of offsets required for all meshes.
+    int maxBlendshapeOffsets = 0;  // number of offsets in the largest mesh.
+    int numMeshes = 0;  // number of meshes in this model.
+    for (auto meshIter = _hfmModel->meshes.cbegin(); meshIter != _hfmModel->meshes.cend(); ++meshIter) {
+        numMeshes++;
+        if (meshIter->blendshapes.isEmpty()) {
+            continue;
+        }
+        int numVertsInMesh = meshIter->vertices.size();
+        numBlendshapeOffsets += numVertsInMesh;
+        maxBlendshapeOffsets = std::max(maxBlendshapeOffsets, numVertsInMesh);
+    }
+
+    // allocate the required sizes
+    QVector<int> blendedMeshSizes;
+    blendedMeshSizes.reserve(numMeshes);
+
+    QVector<BlendshapeOffset> packedBlendshapeOffsets;
+    packedBlendshapeOffsets.resize(numBlendshapeOffsets);
+
+    QVector<BlendshapeOffsetUnpacked> unpackedBlendshapeOffsets;
+    unpackedBlendshapeOffsets.resize(maxBlendshapeOffsets);    // reuse for all meshes
+
+    int offset = 0;
+    for (auto meshIter = _hfmModel->meshes.cbegin(); meshIter != _hfmModel->meshes.cend(); ++meshIter) {
+        if (meshIter->blendshapes.isEmpty()) {
+            blendedMeshSizes.push_back(0);
+            continue;
+        }
+        int numVertsInMesh = meshIter->vertices.size();
+        blendedMeshSizes.push_back(numVertsInMesh);
+
+        // initialize offsets to zero
+        memset(unpackedBlendshapeOffsets.data(), 0, numVertsInMesh * sizeof(BlendshapeOffsetUnpacked));
+
+        // for each blendshape in this mesh, accumulate the offsets into unpackedBlendshapeOffsets.
+        const float NORMAL_COEFFICIENT_SCALE = 0.01f;
+        for (int i = 0, n = qMin(_blendshapeCoefficients.size(), meshIter->blendshapes.size()); i < n; i++) {
+            float vertexCoefficient = _blendshapeCoefficients.at(i);
+            const float EPSILON = 0.0001f;
+            if (vertexCoefficient < EPSILON) {
                 continue;
             }
 
-            blendshapeOffsets += modelMeshBlendshapeOffsets->second;
-            BlendshapeOffset* meshBlendshapeOffsets = blendshapeOffsets.data() + offset;
-            offset += modelMeshBlendshapeOffsets->second.size();
-            std::vector<BlendshapeOffsetUnpacked> unpackedBlendshapeOffsets(modelMeshBlendshapeOffsets->second.size());
+            float normalCoefficient = vertexCoefficient * NORMAL_COEFFICIENT_SCALE;
+            const HFMBlendshape& blendshape = meshIter->blendshapes.at(i);
+            for (int j = 0; j < blendshape.indices.size(); ++j) {
+                int index = blendshape.indices.at(j);
 
-            const float NORMAL_COEFFICIENT_SCALE = 0.01f;
-            for (int i = 0, n = qMin(_blendshapeCoefficients.size(), mesh.blendshapes.size()); i < n; i++) {
-                float vertexCoefficient = _blendshapeCoefficients.at(i);
-                const float EPSILON = 0.0001f;
-                if (vertexCoefficient < EPSILON) {
-                    continue;
+                auto& currentBlendshapeOffset = unpackedBlendshapeOffsets[index];
+                currentBlendshapeOffset.positionOffset += blendshape.vertices.at(j) * vertexCoefficient;
+                currentBlendshapeOffset.normalOffset += blendshape.normals.at(j) * normalCoefficient;
+                if (j < blendshape.tangents.size()) {
+                    currentBlendshapeOffset.tangentOffset += blendshape.tangents.at(j) * normalCoefficient;
                 }
-
-                float normalCoefficient = vertexCoefficient * NORMAL_COEFFICIENT_SCALE;
-                const FBXBlendshape& blendshape = mesh.blendshapes.at(i);
-
-                tbb::parallel_for(tbb::blocked_range<int>(0, blendshape.indices.size()), [&](const tbb::blocked_range<int>& range) {
-                    for (auto j = range.begin(); j < range.end(); j++) {
-                        int index = blendshape.indices.at(j);
-
-                        auto& currentBlendshapeOffset = unpackedBlendshapeOffsets[index];
-                        currentBlendshapeOffset.positionOffset += blendshape.vertices.at(j) * vertexCoefficient;
-
-                        currentBlendshapeOffset.normalOffset += blendshape.normals.at(j) * normalCoefficient;
-                        if (j < blendshape.tangents.size()) {
-                            currentBlendshapeOffset.tangentOffset += blendshape.tangents.at(j) * normalCoefficient;
-                        }
-                    }
-                });
             }
-
-            // Blendshape offsets are generrated, now let's pack it on its way to gpu
-            tbb::parallel_for(tbb::blocked_range<int>(0, (int) unpackedBlendshapeOffsets.size()), [&](const tbb::blocked_range<int>& range) {
-                auto unpacked = unpackedBlendshapeOffsets.data() + range.begin();
-                auto packed = meshBlendshapeOffsets + range.begin();
-                for (auto j = range.begin(); j < range.end(); j++) {
-                    packBlendshapeOffsetTo_Pos_F32_3xSN10_Nor_3xSN10_Tan_3xSN10((*packed).packedPosNorTan, (*unpacked));
-
-                    unpacked++;
-                    packed++;
-                }
-            });
         }
+
+        // convert unpackedBlendshapeOffsets into packedBlendshapeOffsets for the gpu.
+        auto unpacked = unpackedBlendshapeOffsets.data();
+        auto packed = packedBlendshapeOffsets.data() + offset;
+        packBlendshapeOffsets(unpacked, packed, numVertsInMesh);
+
+        offset += numVertsInMesh;
     }
+    Q_ASSERT(offset == numBlendshapeOffsets);
+
     // post the result to the ModelBlender, which will dispatch to the model if still alive
     QMetaObject::invokeMethod(DependencyManager::get<ModelBlender>().data(), "setBlendedVertices",
-        Q_ARG(ModelPointer, _model), Q_ARG(int, _blendNumber), Q_ARG(QVector<BlendshapeOffset>, blendshapeOffsets));
+                              Q_ARG(ModelPointer, _model), Q_ARG(int, _blendNumber),
+                              Q_ARG(QVector<BlendshapeOffset>, packedBlendshapeOffsets),
+                              Q_ARG(QVector<int>, blendedMeshSizes));
 }
 
 bool Model::maybeStartBlender() {
     if (isLoaded()) {
-        QThreadPool::globalInstance()->start(new Blender(getThisPointer(), ++_blendNumber, _renderGeometry, _blendshapeCoefficients));
+        QThreadPool::globalInstance()->start(new Blender(getThisPointer(), getNetworkModel()->getConstHFMModelPointer(),
+                                                         ++_blendNumber, _blendshapeCoefficients));
         return true;
     }
     return false;
-}
-
-void Model::setBlendedVertices(int blendNumber, const QVector<BlendshapeOffset>& blendshapeOffsets) {
-    PROFILE_RANGE(render, __FUNCTION__);
-    if (!isLoaded() || blendNumber < _appliedBlendNumber || !_blendshapeBuffersInitialized) {
-        return;
-    }
-    _appliedBlendNumber = blendNumber;
-    const FBXGeometry& fbxGeometry = getFBXGeometry();
-    int index = 0;
-    for (int i = 0; i < fbxGeometry.meshes.size(); i++) {
-        const FBXMesh& mesh = fbxGeometry.meshes.at(i);
-        auto meshBlendshapeOffsets = _blendshapeOffsets.find(i);
-        const auto& buffer = _blendshapeBuffers.find(i);
-        if (mesh.blendshapes.isEmpty() || meshBlendshapeOffsets == _blendshapeOffsets.end() || buffer == _blendshapeBuffers.end()) {
-            continue;
-        }
-
-        const auto blendshapeOffsetSize = meshBlendshapeOffsets->second.size() * sizeof(BlendshapeOffset);
-        buffer->second->setSubData(0, blendshapeOffsetSize, (gpu::Byte*) blendshapeOffsets.constData() + index * sizeof(BlendshapeOffset));
-
-        index += meshBlendshapeOffsets->second.size();
-    }
-}
-
-void Model::initializeBlendshapes(const FBXMesh& mesh, int index) {
-    if (mesh.blendshapes.empty()) {
-        // mesh doesn't have blendshape, did we allocate one though ?
-        if (_blendshapeBuffers.find(index) != _blendshapeBuffers.end()) {
-            qWarning() << "Mesh does not have Blendshape yet a blendshapeOffset buffer is allocated ?";
-        }
-        return;
-    }
-    // Mesh has blendshape, let s allocate the local buffer if not done yet
-    if (_blendshapeBuffers.find(index) == _blendshapeBuffers.end()) {
-        QVector<BlendshapeOffset> blendshapeOffset;
-        blendshapeOffset.fill(BlendshapeOffset(), mesh.vertices.size());
-        const auto blendshapeOffsetsSize = blendshapeOffset.size() * sizeof(BlendshapeOffset);
-        _blendshapeBuffers[index] = std::make_shared<gpu::Buffer>(blendshapeOffsetsSize, (const gpu::Byte*) blendshapeOffset.constData(), blendshapeOffsetsSize);
-        _blendshapeOffsets[index] = blendshapeOffset;
-    }
 }
 
 ModelBlender::ModelBlender() :
@@ -1791,10 +1887,14 @@ void ModelBlender::noteRequiresBlend(ModelPointer model) {
     }
 }
 
-void ModelBlender::setBlendedVertices(ModelPointer model, int blendNumber, QVector<BlendshapeOffset> blendshapeOffsets) {
+void ModelBlender::setBlendedVertices(ModelPointer model, int blendNumber, QVector<BlendshapeOffset> blendshapeOffsets, QVector<int> blendedMeshSizes) {
     if (model) {
-        model->setBlendedVertices(blendNumber, blendshapeOffsets);
+        auto blendshapeOperator = model->getModelBlendshapeOperator();
+        if (blendshapeOperator) {
+            blendshapeOperator(blendNumber, blendshapeOffsets, blendedMeshSizes, model->fetchRenderItemIDs());
+        }
     }
+
     {
         Lock lock(_mutex);
         _pendingBlenders--;

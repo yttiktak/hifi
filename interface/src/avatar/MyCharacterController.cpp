@@ -12,8 +12,10 @@
 #include "MyCharacterController.h"
 
 #include <BulletUtil.h>
+#include "BulletCollision/NarrowPhaseCollision/btRaycastCallback.h"
 
 #include "MyAvatar.h"
+#include "DetailedMotionState.h"
 
 // TODO: make avatars stand on steep slope
 // TODO: make avatars not snag on low ceilings
@@ -24,7 +26,7 @@ void MyCharacterController::RayShotgunResult::reset() {
     walkable = true;
 }
 
-MyCharacterController::MyCharacterController(MyAvatar* avatar) {
+MyCharacterController::MyCharacterController(std::shared_ptr<MyAvatar> avatar) {
 
     assert(avatar);
     _avatar = avatar;
@@ -34,17 +36,16 @@ MyCharacterController::MyCharacterController(MyAvatar* avatar) {
 MyCharacterController::~MyCharacterController() {
 }
 
-void MyCharacterController::setDynamicsWorld(btDynamicsWorld* world) {
-    CharacterController::setDynamicsWorld(world);
-    if (world && _rigidBody) {
-        initRayShotgun(world);
+void MyCharacterController::addToWorld() {
+    CharacterController::addToWorld();
+    if (_rigidBody) {
+        initRayShotgun(_physicsEngine->getDynamicsWorld());
     }
 }
 
 void MyCharacterController::updateShapeIfNecessary() {
     if (_pendingFlags & PENDING_FLAG_UPDATE_SHAPE) {
         _pendingFlags &= ~PENDING_FLAG_UPDATE_SHAPE;
-
         if (_radius > 0.0f) {
             // create RigidBody if it doesn't exist
             if (!_rigidBody) {
@@ -202,6 +203,30 @@ bool MyCharacterController::testRayShotgun(const glm::vec3& position, const glm:
     return result.hitFraction < 1.0f;
 }
 
+int32_t MyCharacterController::computeCollisionMask() const {
+    int32_t collisionMask = BULLET_COLLISION_MASK_MY_AVATAR;
+    if (_collisionless && _collisionlessAllowed) {
+        collisionMask = BULLET_COLLISION_MASK_COLLISIONLESS;
+    } else if (!_collideWithOtherAvatars) {
+        collisionMask &= ~BULLET_COLLISION_GROUP_OTHER_AVATAR;
+    }
+    return collisionMask;
+}
+
+void MyCharacterController::handleChangedCollisionMask() {
+    if (_pendingFlags & PENDING_FLAG_UPDATE_COLLISION_MASK) {
+        // ATM the easiest way to update collision groups/masks is to remove/re-add the RigidBody
+        // but we don't do it here.  Instead we set some flags to remind us to do it later.
+        _pendingFlags |= (PENDING_FLAG_REMOVE_FROM_SIMULATION | PENDING_FLAG_ADD_TO_SIMULATION);
+        _pendingFlags &= ~PENDING_FLAG_UPDATE_COLLISION_MASK;
+        updateCurrentGravity();
+    }
+}
+
+bool MyCharacterController::needsSafeLandingSupport() const {
+    return _isStuck && _numStuckSubsteps >= NUM_SUBSTEPS_FOR_SAFE_LANDING_RETRY;
+}
+
 btConvexHullShape* MyCharacterController::computeShape() const {
     // HACK: the avatar collides using convex hull with a collision margin equal to
     // the old capsule radius.  Two points define a capsule and additional points are
@@ -351,4 +376,110 @@ void MyCharacterController::updateMassProperties() {
     btScalar mass = _density * (volumeCylinder + volumeSphere);
 
     _rigidBody->setMassProps(mass, inertia);
+}
+
+const btCollisionShape* MyCharacterController::createDetailedCollisionShapeForJoint(int32_t jointIndex) {
+    ShapeInfo shapeInfo;
+    _avatar->computeDetailedShapeInfo(shapeInfo, jointIndex);
+    if (shapeInfo.getType() != SHAPE_TYPE_NONE) {
+        const btCollisionShape* shape = ObjectMotionState::getShapeManager()->getShape(shapeInfo);
+        return shape;
+    }
+    return nullptr;
+}
+
+DetailedMotionState* MyCharacterController::createDetailedMotionStateForJoint(int32_t jointIndex) {
+    const btCollisionShape* shape = createDetailedCollisionShapeForJoint(jointIndex);
+    if (shape) {
+        DetailedMotionState* motionState = new DetailedMotionState(_avatar, shape, jointIndex);
+        motionState->setMass(_avatar->computeMass());
+        return motionState;
+    }
+    return nullptr;
+}
+
+void MyCharacterController::clearDetailedMotionStates() {
+    // we don't actually clear the MotionStates here
+    // instead we twiddle some flags as a signal of what to do later
+    _pendingFlags |= PENDING_FLAG_REMOVE_DETAILED_FROM_SIMULATION; 
+    // We make sure we don't add them again
+    _pendingFlags &= ~PENDING_FLAG_ADD_DETAILED_TO_SIMULATION;
+}
+
+void MyCharacterController::buildPhysicsTransaction(PhysicsEngine::Transaction& transaction) {
+    for (size_t i = 0; i < _detailedMotionStates.size(); i++) {
+        _detailedMotionStates[i]->forceActive();
+    }
+    if (_pendingFlags & PENDING_FLAG_REMOVE_DETAILED_FROM_SIMULATION) {
+        _pendingFlags &= ~PENDING_FLAG_REMOVE_DETAILED_FROM_SIMULATION;
+        for (size_t i = 0; i < _detailedMotionStates.size(); i++) {
+            transaction.objectsToRemove.push_back(_detailedMotionStates[i]);
+        }
+        // NOTE: the DetailedMotionStates are deleted after being added to PhysicsEngine::Transaction::_objectsToRemove
+        // See AvatarManager::handleProcessedPhysicsTransaction()
+        _detailedMotionStates.clear();
+    }
+    if (_pendingFlags & PENDING_FLAG_ADD_DETAILED_TO_SIMULATION) {
+        _pendingFlags &= ~PENDING_FLAG_ADD_DETAILED_TO_SIMULATION;
+        for (int32_t i = 0; i < _avatar->getJointCount(); i++) {
+            auto dMotionState = createDetailedMotionStateForJoint(i);
+            if (dMotionState) {
+                _detailedMotionStates.push_back(dMotionState);
+                transaction.objectsToAdd.push_back(dMotionState);
+            }
+        }
+    }
+}
+
+class DetailedRayResultCallback : public btCollisionWorld::AllHitsRayResultCallback {
+public:
+    DetailedRayResultCallback()
+        : btCollisionWorld::AllHitsRayResultCallback(btVector3(0.0f, 0.0f, 0.0f), btVector3(0.0f, 0.0f, 0.0f)) {
+        // the RayResultCallback's group and mask must match MY_AVATAR
+        m_collisionFilterGroup = BULLET_COLLISION_GROUP_DETAILED_RAY;
+        m_collisionFilterMask = BULLET_COLLISION_MASK_DETAILED_RAY;
+    }
+
+    virtual btScalar addSingleResult(btCollisionWorld::LocalRayResult& rayResult, bool normalInWorldSpace) override {
+        return AllHitsRayResultCallback::addSingleResult(rayResult, normalInWorldSpace);
+    }
+};
+
+std::vector<MyCharacterController::RayAvatarResult> MyCharacterController::rayTest(const btVector3& origin, const btVector3& direction,
+                                                                                   const btScalar& length, const QVector<uint>& jointsToExclude) const {
+    std::vector<RayAvatarResult> foundAvatars;
+    if (_physicsEngine) {
+        btVector3 end = origin + length * direction;
+        DetailedRayResultCallback rayCallback = DetailedRayResultCallback();
+        rayCallback.m_flags |= btTriangleRaycastCallback::kF_KeepUnflippedNormal;
+        rayCallback.m_flags |= btTriangleRaycastCallback::kF_UseSubSimplexConvexCastRaytest;
+        _physicsEngine->getDynamicsWorld()->rayTest(origin, end, rayCallback);
+        if (rayCallback.m_hitFractions.size() > 0) {
+            foundAvatars.reserve(rayCallback.m_hitFractions.size());
+            for (int32_t i = 0; i < rayCallback.m_hitFractions.size(); i++) {
+                auto object = rayCallback.m_collisionObjects[i];
+                ObjectMotionState* motionState = static_cast<ObjectMotionState*>(object->getUserPointer());
+                if (motionState && motionState->getType() == MOTIONSTATE_TYPE_DETAILED) {
+                    DetailedMotionState* detailedMotionState = dynamic_cast<DetailedMotionState*>(motionState);
+                    MyCharacterController::RayAvatarResult result;
+                    result._intersect = true;
+                    result._intersectWithAvatar = detailedMotionState->getAvatarID();
+                    result._intersectionPoint = bulletToGLM(rayCallback.m_hitPointWorld[i]);
+                    result._intersectionNormal = bulletToGLM(rayCallback.m_hitNormalWorld[i]);
+                    result._distance = length * rayCallback.m_hitFractions[i];
+                    result._intersectWithJoint = detailedMotionState->getJointIndex();
+                    result._isBound = detailedMotionState->getIsBound(result._boundJoints);
+                    btVector3 center;
+                    btScalar radius;
+                    detailedMotionState->getShape()->getBoundingSphere(center, radius);
+                    result._maxDistance = (float)radius;
+                    foundAvatars.push_back(result);
+                }
+            }
+            std::sort(foundAvatars.begin(), foundAvatars.end(), [](const RayAvatarResult& resultA, const RayAvatarResult& resultB) {
+                return resultA._distance < resultB._distance;
+            });
+        }
+    }
+    return foundAvatars;
 }

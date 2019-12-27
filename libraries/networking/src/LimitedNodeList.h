@@ -49,9 +49,9 @@
 
 const int INVALID_PORT = -1;
 
-const quint64 NODE_SILENCE_THRESHOLD_MSECS = 5 * 1000;
+const quint64 NODE_SILENCE_THRESHOLD_MSECS = 10 * 1000;
 
-extern const std::set<NodeType_t> SOLO_NODE_TYPES;
+static const size_t DEFAULT_MAX_CONNECTION_RATE { std::numeric_limits<size_t>::max() };
 
 const char DEFAULT_ASSIGNMENT_SERVER_HOSTNAME[] = "localhost";
 
@@ -108,6 +108,14 @@ public:
     };
 
     Q_ENUM(ConnectionStep);
+
+    enum ConnectReason : quint32 {
+        Connect = 0,
+        SilentDomainDisconnect,
+        Awake
+    };
+    Q_ENUM(ConnectReason);
+
     QUuid getSessionUUID() const;
     void setSessionUUID(const QUuid& sessionUUID);
     Node::LocalID getSessionLocalID() const;
@@ -122,7 +130,8 @@ public:
     bool getThisNodeCanWriteAssets() const { return _permissions.can(NodePermissions::Permission::canWriteToAssetServer); }
     bool getThisNodeCanKick() const { return _permissions.can(NodePermissions::Permission::canKick); }
     bool getThisNodeCanReplaceContent() const { return _permissions.can(NodePermissions::Permission::canReplaceDomainContent); }
-    
+    bool getThisNodeCanGetAndSetPrivateUserData() const { return _permissions.can(NodePermissions::Permission::canGetAndSetPrivateUserData); }
+
     quint16 getSocketLocalPort() const { return _nodeSocket.localPort(); }
     Q_INVOKABLE void setSocketLocalPort(quint16 socketLocalPort);
 
@@ -183,9 +192,6 @@ public:
     unsigned int broadcastToNodes(std::unique_ptr<NLPacket> packet, const NodeSet& destinationNodeTypes);
     SharedNodePointer soloNodeOfType(NodeType_t nodeType);
 
-    void getPacketStats(float& packetsInPerSecond, float& bytesInPerSecond, float& packetsOutPerSecond, float& bytesOutPerSecond);
-    void resetPacketStats();
-
     std::unique_ptr<NLPacket> constructPingPacket(const QUuid& nodeId, PingType_t pingType = PingType::Agnostic);
     std::unique_ptr<NLPacket> constructPingReplyPacket(ReceivedMessage& message);
 
@@ -204,11 +210,14 @@ public:
     //   This allows multiple threads (i.e. a thread pool) to share a lock
     //   without deadlocking when a dying node attempts to acquire a write lock
     template<typename NestedNodeLambda>
-    void nestedEach(NestedNodeLambda functor, 
-                    int* lockWaitOut = nullptr, 
-                    int* nodeTransformOut = nullptr, 
+    void nestedEach(NestedNodeLambda functor,
+                    int* lockWaitOut = nullptr,
+                    int* nodeTransformOut = nullptr,
                     int* functorOut = nullptr) {
-        auto start = usecTimestampNow();
+        quint64 start, endTransform, endFunctor;
+
+        start = usecTimestampNow();
+        std::vector<SharedNodePointer> nodes;
         {
             QReadLocker readLock(&_nodeMutex);
             auto endLock = usecTimestampNow();
@@ -219,21 +228,21 @@ public:
             // Size of _nodeHash could change at any time,
             // so reserve enough memory for the current size
             // and then back insert all the nodes found
-            std::vector<SharedNodePointer> nodes;
             nodes.reserve(_nodeHash.size());
             std::transform(_nodeHash.cbegin(), _nodeHash.cend(), std::back_inserter(nodes), [&](const NodeHash::value_type& it) {
                 return it.second;
             });
-            auto endTransform = usecTimestampNow();
+
+            endTransform = usecTimestampNow();
             if (nodeTransformOut) {
                 *nodeTransformOut = (endTransform - endLock);
             }
+        }
 
-            functor(nodes.cbegin(), nodes.cend());
-            auto endFunctor = usecTimestampNow();
-            if (functorOut) {
-                *functorOut = (endFunctor - endTransform);
-            }
+        functor(nodes.cbegin(), nodes.cend());
+        endFunctor = usecTimestampNow();
+        if (functorOut) {
+            *functorOut = (endFunctor - endTransform);
         }
     }
 
@@ -310,15 +319,37 @@ public:
     void setAuthenticatePackets(bool useAuthentication) { _useAuthentication = useAuthentication; }
     bool getAuthenticatePackets() const { return _useAuthentication; }
 
+    void setFlagTimeForConnectionStep(bool flag) { _flagTimeForConnectionStep = flag; }
+    bool isFlagTimeForConnectionStep() { return _flagTimeForConnectionStep; }
+
     static void makeSTUNRequestPacket(char* stunRequestPacket);
 
 #if (PR_BUILD || DEV_BUILD)
     void sendFakedHandshakeRequestToNode(SharedNodePointer node);
 #endif
 
+    size_t getMaxConnectionRate() const { return _maxConnectionRate; }
+    void setMaxConnectionRate(size_t rate) { _maxConnectionRate = rate; }
+
+    int getInboundPPS() const { return _inboundPPS; }
+    int getOutboundPPS() const { return _outboundPPS; }
+    float getInboundKbps() const { return _inboundKbps; }
+    float getOutboundKbps() const { return _outboundKbps; }
+
+    void setDropOutgoingNodeTraffic(bool squelchOutgoingNodeTraffic) { _dropOutgoingNodeTraffic = squelchOutgoingNodeTraffic; }
+
+    const std::set<NodeType_t> SOLO_NODE_TYPES = {
+        NodeType::AvatarMixer,
+        NodeType::AudioMixer,
+        NodeType::AssetServer,
+        NodeType::EntityServer,
+        NodeType::MessagesMixer,
+        NodeType::EntityScriptServer
+    };
+
 public slots:
-    void reset();
-    void eraseAllNodes();
+    void reset(QString reason);
+    void eraseAllNodes(QString reason);
 
     void removeSilentNodes();
 
@@ -328,11 +359,12 @@ public slots:
     virtual void sendSTUNRequest();
 
     bool killNodeWithUUID(const QUuid& nodeUUID, ConnectionID newConnectionID = NULL_CONNECTION_ID);
+    void noteAwakening() { _connectReason = Awake; }
+
+private slots:
+    void sampleConnectionStats();
 
 signals:
-    void dataSent(quint8 channelType, int bytes);
-    void dataReceived(quint8 channelType, int bytes);
-
     // QUuid might be zero for non-sourced packet types.
     void packetVersionMismatch(PacketType type, const HifiSockAddr& senderSockAddr, const QUuid& senderUUID);
 
@@ -355,6 +387,7 @@ signals:
     void canWriteAssetsChanged(bool canWriteAssets);
     void canKickChanged(bool canKick);
     void canReplaceContentChanged(bool canReplaceContent);
+    void canGetAndSetPrivateUserDataChanged(bool canGetAndSetPrivateUserData);
 
 protected slots:
     void connectedForLocalSocketTest();
@@ -362,16 +395,26 @@ protected slots:
 
     void clientConnectionToSockAddrReset(const HifiSockAddr& sockAddr);
 
+    void processDelayedAdds();
+
 protected:
+    struct NewNodeInfo {
+        qint8 type;
+        QUuid uuid;
+        HifiSockAddr publicSocket;
+        HifiSockAddr localSocket;
+        NodePermissions permissions;
+        bool isReplicated;
+        Node::LocalID sessionLocalID;
+        QUuid connectionSecretUUID;
+    };
+
     LimitedNodeList(int socketListenPort = INVALID_PORT, int dtlsListenPort = INVALID_PORT);
     LimitedNodeList(LimitedNodeList const&) = delete; // Don't implement, needed to avoid copies of singleton
     void operator=(LimitedNodeList const&) = delete; // Don't implement, needed to avoid copies of singleton
 
     qint64 sendPacket(std::unique_ptr<NLPacket> packet, const Node& destinationNode,
                       const HifiSockAddr& overridenSockAddr);
-    qint64 writePacket(const NLPacket& packet, const HifiSockAddr& destinationSockAddr,
-                       const QUuid& connectionSecret = QUuid());
-    void collectPacketStats(const NLPacket& packet);
     void fillPacketHeader(const NLPacket& packet, HMACAuth* hmacAuth = nullptr);
 
     void setLocalSocket(const HifiSockAddr& sockAddr);
@@ -386,7 +429,12 @@ protected:
     void sendPacketToIceServer(PacketType packetType, const HifiSockAddr& iceServerSockAddr, const QUuid& clientID,
                                const QUuid& peerRequestID = QUuid());
 
-    bool sockAddrBelongsToNode(const HifiSockAddr& sockAddr) { return findNodeWithAddr(sockAddr) != SharedNodePointer(); }
+    bool sockAddrBelongsToNode(const HifiSockAddr& sockAddr);
+
+    void addNewNode(NewNodeInfo info);
+    void delayNodeAdd(NewNodeInfo info);
+    void removeDelayedAdd(QUuid nodeUUID);
+    bool isDelayedNode(QUuid nodeUUID);
 
     NodeHash _nodeHash;
     mutable QReadWriteLock _nodeMutex { QReadWriteLock::Recursive };
@@ -400,10 +448,6 @@ protected:
 
     PacketReceiver* _packetReceiver;
 
-    std::atomic<int> _numCollectedPackets { 0 };
-    std::atomic<int> _numCollectedBytes { 0 };
-
-    QElapsedTimer _packetStatTimer;
     NodePermissions _permissions;
 
     QPointer<QTimer> _initialSTUNTimer;
@@ -428,6 +472,9 @@ protected:
     }
 
     std::unordered_map<QUuid, ConnectionID> _connectionIDs;
+    quint64 _nodeConnectTimestamp{ 0 };
+    quint64 _nodeDisconnectTimestamp{ 0 };
+    ConnectReason _connectReason { Connect };
 
 private slots:
     void flagTimeForConnectionStep(ConnectionStep connectionStep, quint64 timestamp);
@@ -440,6 +487,21 @@ private:
     using LocalIDMapping = tbb::concurrent_unordered_map<Node::LocalID, SharedNodePointer>;
     LocalIDMapping _localIDMap;
     Node::LocalID _sessionLocalID { 0 };
+    bool _flagTimeForConnectionStep { false }; // only keep track in interface
+
+    size_t _maxConnectionRate { DEFAULT_MAX_CONNECTION_RATE };
+    size_t _nodesAddedInCurrentTimeSlice { 0 };
+    std::vector<NewNodeInfo> _delayedNodeAdds;
+
+    int _inboundPPS { 0 };
+    int _outboundPPS { 0 };
+    float _inboundKbps { 0.0f };
+    float _outboundKbps { 0.0f };
+
+    bool _dropOutgoingNodeTraffic { false };
+
+    quint64 _sendErrorStatsTime { (quint64)0 };
+    static const quint64 ERROR_STATS_PERIOD_US { 1 * USECS_PER_SECOND };
 };
 
 #endif // hifi_LimitedNodeList_h

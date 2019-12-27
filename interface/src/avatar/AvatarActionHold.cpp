@@ -58,6 +58,16 @@ AvatarActionHold::~AvatarActionHold() {
 #endif
 }
 
+void AvatarActionHold::removeFromOwner() {
+    auto avatarManager = DependencyManager::get<AvatarManager>();
+    if (avatarManager) {
+        auto myAvatar = avatarManager->getMyAvatar();
+        if (myAvatar) {
+            myAvatar->removeHoldAction(this);
+        }
+    }
+}
+
 bool AvatarActionHold::getAvatarRigidBodyLocation(glm::vec3& avatarRigidBodyPosition, glm::quat& avatarRigidBodyRotation) {
     auto myAvatar = DependencyManager::get<AvatarManager>()->getMyAvatar();
     MyCharacterController* controller = myAvatar ? myAvatar->getCharacterController() : nullptr;
@@ -135,7 +145,7 @@ bool AvatarActionHold::getTarget(float deltaTimeStep, glm::quat& rotation, glm::
         glm::vec3 palmPosition;
         glm::quat palmRotation;
 
-        bool isTransitingWithAvatar = holdingAvatar->getTransit()->isTransiting();
+        bool isTransitingWithAvatar = holdingAvatar->getTransit()->isActive();
         if (isTransitingWithAvatar != _isTransitingWithAvatar) {
             _isTransitingWithAvatar = isTransitingWithAvatar;
             auto ownerEntity = _ownerEntity.lock();
@@ -143,7 +153,7 @@ bool AvatarActionHold::getTarget(float deltaTimeStep, glm::quat& rotation, glm::
                 ownerEntity->setTransitingWithAvatar(_isTransitingWithAvatar);
             }
         }
-        
+
         if (holdingAvatar->isMyAvatar()) {
             std::shared_ptr<MyAvatar> myAvatar = avatarManager->getMyAvatar();
 
@@ -226,7 +236,7 @@ bool AvatarActionHold::getTarget(float deltaTimeStep, glm::quat& rotation, glm::
         }
 
         rotation = palmRotation * _relativeRotation;
-        position = palmPosition + rotation * _relativePosition;
+        position = palmPosition + palmRotation * _relativePosition;
 
         // update linearVelocity based on offset via _relativePosition;
         linearVelocity = linearVelocity + glm::cross(angularVelocity, position - palmPosition);
@@ -278,39 +288,37 @@ void AvatarActionHold::doKinematicUpdate(float deltaTimeStep) {
             glm::vec3 oneFrameVelocity = (_positionalTarget - _previousPositionalTarget) / deltaTimeStep;
 
             _measuredLinearVelocities[_measuredLinearVelocitiesIndex++] = oneFrameVelocity;
-            if (_measuredLinearVelocitiesIndex >= AvatarActionHold::velocitySmoothFrames) {
-                _measuredLinearVelocitiesIndex = 0;
+            _measuredLinearVelocitiesIndex %= AvatarActionHold::velocitySmoothFrames;
+        }
+
+        if (_kinematicSetVelocity) {
+            glm::vec3 measuredLinearVelocity = _measuredLinearVelocities[0];
+            for (int i = 1; i < AvatarActionHold::velocitySmoothFrames; i++) {
+                // there is a bit of lag between when someone releases the trigger and when the software reacts to
+                // the release.  we calculate the velocity from previous frames but we don't include several
+                // of the most recent.
+                //
+                // if _measuredLinearVelocitiesIndex is
+                //     0 -- ignore i of 3 4 5
+                //     1 -- ignore i of 4 5 0
+                //     2 -- ignore i of 5 0 1
+                //     3 -- ignore i of 0 1 2
+                //     4 -- ignore i of 1 2 3
+                //     5 -- ignore i of 2 3 4
+
+                // This code is now disabled, but I'm leaving it commented-out because I suspect it will come back.
+                // if ((i + 1) % AvatarActionHold::velocitySmoothFrames == _measuredLinearVelocitiesIndex ||
+                //     (i + 2) % AvatarActionHold::velocitySmoothFrames == _measuredLinearVelocitiesIndex ||
+                //     (i + 3) % AvatarActionHold::velocitySmoothFrames == _measuredLinearVelocitiesIndex) {
+                //     continue;
+                // }
+
+                measuredLinearVelocity += _measuredLinearVelocities[i];
             }
-        }
-
-        glm::vec3 measuredLinearVelocity;
-        for (int i = 0; i < AvatarActionHold::velocitySmoothFrames; i++) {
-            // there is a bit of lag between when someone releases the trigger and when the software reacts to
-            // the release.  we calculate the velocity from previous frames but we don't include several
-            // of the most recent.
-            //
-            // if _measuredLinearVelocitiesIndex is
-            //     0 -- ignore i of 3 4 5
-            //     1 -- ignore i of 4 5 0
-            //     2 -- ignore i of 5 0 1
-            //     3 -- ignore i of 0 1 2
-            //     4 -- ignore i of 1 2 3
-            //     5 -- ignore i of 2 3 4
-
-            // This code is now disabled, but I'm leaving it commented-out because I suspect it will come back.
-            // if ((i + 1) % AvatarActionHold::velocitySmoothFrames == _measuredLinearVelocitiesIndex ||
-            //     (i + 2) % AvatarActionHold::velocitySmoothFrames == _measuredLinearVelocitiesIndex ||
-            //     (i + 3) % AvatarActionHold::velocitySmoothFrames == _measuredLinearVelocitiesIndex) {
-            //     continue;
-            // }
-
-            measuredLinearVelocity += _measuredLinearVelocities[i];
-        }
-        measuredLinearVelocity /= (float)(AvatarActionHold::velocitySmoothFrames
+            measuredLinearVelocity /= (float)(AvatarActionHold::velocitySmoothFrames
                                           // - 3  // 3 because of the 3 we skipped, above
                                           );
 
-        if (_kinematicSetVelocity) {
             rigidBody->setLinearVelocity(glmToBullet(measuredLinearVelocity));
             rigidBody->setAngularVelocity(glmToBullet(_angularVelocityTarget));
         }
@@ -369,8 +377,12 @@ bool AvatarActionHold::updateArguments(QVariantMap arguments) {
             hand = _hand;
         }
 
-        auto myAvatar = DependencyManager::get<AvatarManager>()->getMyAvatar();
-        holderID = myAvatar->getSessionUUID();
+        ok = true;
+        holderID = EntityDynamicInterface::extractStringArgument("hold", arguments, "holderID", ok, false);
+        if (!ok) {
+            auto myAvatar = DependencyManager::get<AvatarManager>()->getMyAvatar();
+            holderID = myAvatar->getSessionUUID();
+        }
 
         ok = true;
         kinematic = EntityDynamicInterface::extractBooleanArgument("hold", arguments, "kinematic", ok, false);
@@ -417,14 +429,14 @@ bool AvatarActionHold::updateArguments(QVariantMap arguments) {
             _kinematicSetVelocity = kinematicSetVelocity;
             _ignoreIK = ignoreIK;
             _active = true;
-            
+
             auto myAvatar = DependencyManager::get<AvatarManager>()->getMyAvatar();
 
             auto ownerEntity = _ownerEntity.lock();
             if (ownerEntity) {
                 ownerEntity->setDynamicDataDirty(true);
-                ownerEntity->setDynamicDataNeedsTransmit(true);     
-                ownerEntity->setTransitingWithAvatar(myAvatar->getTransit()->isTransiting());
+                ownerEntity->setDynamicDataNeedsTransmit(true);
+                ownerEntity->setTransitingWithAvatar(myAvatar->getTransit()->isActive());
             }
         });
     }
@@ -435,22 +447,24 @@ bool AvatarActionHold::updateArguments(QVariantMap arguments) {
 /**jsdoc
  * The <code>"hold"</code> {@link Entities.ActionType|ActionType} positions and rotates an entity relative to an avatar's hand. 
  * Collisions between the entity and the user's avatar are disabled during the hold.
- * It has arguments in addition to the common {@link Entities.ActionArguments|ActionArguments}.
+ * It has arguments in addition to the common {@link Entities.ActionArguments|ActionArguments}:
  *
  * @typedef {object} Entities.ActionArguments-Hold
  * @property {Uuid} holderID=MyAvatar.sessionUUID - The ID of the avatar holding the entity.
+ * @property {string} hand=right - The hand holding the entity: <code>"left"</code> or <code>"right"</code>.
  * @property {Vec3} relativePosition=0,0,0 - The target position relative to the avatar's hand.
  * @property {Vec3} relativeRotation=0,0,0,1 - The target rotation relative to the avatar's hand.
  * @property {number} timeScale=3.4e+38 - Controls how long it takes for the entity's position and rotation to catch up with 
  *     the target. The value is the time for the action to catch up to 1/e = 0.368 of the target value, where the action is 
  *     applied using an exponential decay.
- * @property {string} hand=right - The hand holding the entity: <code>"left"</code> or <code>"right"</code>.
- * @property {boolean} kinematic=false - If <code>true</code>, the entity is made kinematic during the action; the entity won't 
- *    lag behind the hand but constraint actions such as <code>"hinge"</code> won't act properly.
- * @property {boolean} kinematicSetVelocity=false - If <code>true</code> and <code>kinematic</code> is <code>true</code>, the 
- *    entity's <code>velocity</code> property will be set during the action, e.g., so that other scripts may use the value.
- * @property {boolean} ignoreIK=false - If <code>true</code>, the entity follows the HMD controller rather than the avatar's 
- *    hand.
+ * @property {boolean} kinematic=false - <code>true</code> if the entity is made kinematic during the action; the entity won't 
+ *     lag behind the hand but constraint actions such as <code>"hinge"</code> won't act properly. <code>false</code> if the 
+ *     entity is not made kinematic during the action
+ * @property {boolean} kinematicSetVelocity=false - <code>true</code> if, when <code>kinematic</code> is <code>true</code>, the 
+ *     entity's velocity will be set during the action, e.g., so that other scripts may use the value. <code>false</code> if 
+ *     the entity's velocity will not be set during the action.
+ * @property {boolean} ignoreIK=false - <code>true</code> if the entity follows the HMD controller, <code>false</code> if it 
+ *     follows the avatar's hand.
  */
 QVariantMap AvatarActionHold::getArguments() {
     QVariantMap arguments = ObjectDynamic::getArguments();

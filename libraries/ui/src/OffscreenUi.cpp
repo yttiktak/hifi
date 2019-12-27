@@ -27,17 +27,26 @@
 #include "VrMenu.h"
 
 #include "ui/Logging.h"
+#include "ui/ToolbarScriptingInterface.h"
 
 #include <PointerManager.h>
 #include "MainWindow.h"
 
 /**jsdoc
+ * The <code>OffscreenFlags</code> API enables gamepad joystick navigation of UI.
+ *
+ * <p><em>This API currently has no effect and is not used.</em></p>
+ *
  * @namespace OffscreenFlags
  * 
  * @hifi-interface
  * @hifi-client-entity
- * @property {boolean} navigationFocused
- * @property {boolean} navigationFocusDisabled
+ * @hifi-avatar
+ *
+ * @property {boolean} navigationFocused - <code>true</code> if UI has joystick navigation focus, <code>false</code> if it 
+ *     doesn't.
+ * @property {boolean} navigationFocusDisabled - <code>true</code> if UI joystick navigation focus is disabled, 
+ *     <code>false</code> if it isn't.
  */
 
 // Needs to match the constants in resources/qml/Global.js
@@ -70,12 +79,14 @@ public:
 signals:
 
     /**jsdoc
+     * Triggered when the value of the <code>navigationFocused</code> property changes.
      * @function OffscreenFlags.navigationFocusedChanged
      * @returns {Signal}
      */
     void navigationFocusedChanged();
 
     /**jsdoc
+     * Triggered when the value of the <code>navigationFocusDisabled</code> property changes.
      * @function OffscreenFlags.navigationFocusDisabledChanged
      * @returns {Signal}
      */
@@ -239,13 +250,21 @@ class MessageBoxListener : public ModalDialogListener {
         return static_cast<QMessageBox::StandardButton>(_result.toInt());
     }
 
+protected slots:
+    virtual void onDestroyed() override {
+        ModalDialogListener::onDestroyed();
+        onSelected(QMessageBox::NoButton);
+    }
+
 private slots:
     void onSelected(int button) {
         _result = button;
         _finished = true;
         auto offscreenUi = DependencyManager::get<OffscreenUi>();
         emit response(_result);
-        offscreenUi->removeModalDialog(qobject_cast<QObject*>(this));
+        if (!offscreenUi.isNull()) {
+            offscreenUi->removeModalDialog(qobject_cast<QObject*>(this));
+        }
         disconnect(_dialog);
     }
 };
@@ -616,7 +635,9 @@ bool OffscreenUi::navigationFocused() {
 }
 
 void OffscreenUi::setNavigationFocused(bool focused) {
-    offscreenFlags->setNavigationFocused(focused);
+    if (offscreenFlags) {
+        offscreenFlags->setNavigationFocused(focused);
+    }
 }
 
 // FIXME HACK....
@@ -637,24 +658,28 @@ public:
     KeyboardFocusHack() {
         Q_ASSERT(_mainWindow);
         QTimer::singleShot(200, [=] {
-            _hackWindow = new QWindow();
-            _hackWindow->setFlags(Qt::FramelessWindowHint);
-            _hackWindow->setGeometry(_mainWindow->x(), _mainWindow->y(), 10, 10);
-            _hackWindow->show();
-            _hackWindow->requestActivate();
+            _window = new QWindow();
+            _window->setFlags(Qt::FramelessWindowHint);
+            _window->setGeometry(_mainWindow->x(), _mainWindow->y(), 10, 10);
+            _window->show();
+            _window->requestActivate();
             QTimer::singleShot(200, [=] {
-                _hackWindow->hide();
-                _hackWindow->deleteLater();
-                _hackWindow = nullptr;
+                _window->hide();
+                _window->deleteLater();
+                _window = nullptr;
                 _mainWindow->requestActivate();
+                emit keyboardFocusActive();
                 this->deleteLater();
             });
         });
     }
 
+signals:
+    void keyboardFocusActive();
+
 private:
     QWindow* const _mainWindow { MainWindow::findMainWindow() };
-    QWindow* _hackWindow { nullptr };
+    QWindow* _window { nullptr };
 };
 
 void OffscreenUi::createDesktop(const QUrl& url) {
@@ -673,9 +698,14 @@ void OffscreenUi::createDesktop(const QUrl& url) {
             menuInitializer(_vrMenu);
         }
 
-        new KeyboardFocusHack();
+
+        auto toolbarScriptingInterface = DependencyManager::get<ToolbarScriptingInterface>();
+        connect(_desktop, SIGNAL(toolbarVisibleChanged(bool, QString)), toolbarScriptingInterface.data(), SIGNAL(toolbarVisibleChanged(bool, QString)));
+
+        auto keyboardFocus = new KeyboardFocusHack();
         connect(_desktop, SIGNAL(showDesktop()), this, SIGNAL(showDesktop()));
         emit desktopReady();
+        connect(keyboardFocus, SIGNAL(keyboardFocusActive()), this, SIGNAL(keyboardFocusActive()));
     });
 }
 

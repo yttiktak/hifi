@@ -1203,7 +1203,8 @@ void OctreeServer::beginRunning() {
     auto nodeList = DependencyManager::get<NodeList>();
 
     // we need to ask the DS about agents so we can ping/reply with them
-    nodeList->addSetOfNodeTypesToNodeInterestSet({ NodeType::Agent, NodeType::EntityScriptServer });
+    nodeList->addSetOfNodeTypesToNodeInterestSet({ NodeType::Agent, NodeType::EntityScriptServer,
+        NodeType::AvatarMixer });
 
     beforeRun(); // after payload has been processed
 
@@ -1291,6 +1292,7 @@ void OctreeServer::aboutToFinish() {
     for (auto& it : _sendThreads) {
         auto& sendThread = *it.second;
         sendThread.setIsShuttingDown();
+        sendThread.terminate();
     }
 
     // Clear will destruct all the unique_ptr to OctreeSendThreads which will call the GenericThread's dtor

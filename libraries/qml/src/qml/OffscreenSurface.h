@@ -30,6 +30,7 @@ class QQmlComponent;
 class QQuickWindow;
 class QQuickItem;
 class OffscreenQmlSharedObject;
+class QQmlFileSelector;
 
 namespace hifi { namespace qml {
 
@@ -39,6 +40,7 @@ class SharedObject;
 
 using QmlContextCallback = ::std::function<void(QQmlContext*)>;
 using QmlContextObjectCallback = ::std::function<void(QQmlContext*, QQuickItem*)>;
+using QmlUrlValidator = std::function<bool(const QUrl&)>;
 
 class OffscreenSurface : public QObject {
     Q_OBJECT
@@ -46,10 +48,13 @@ class OffscreenSurface : public QObject {
 public:
     static const QmlContextObjectCallback DEFAULT_CONTEXT_OBJECT_CALLBACK;
     static const QmlContextCallback DEFAULT_CONTEXT_CALLBACK;
-
+    static QmlUrlValidator validator;
     using TextureAndFence = std::pair<uint32_t, void*>;
     using MouseTranslator = std::function<QPoint(const QPointF&)>;
 
+
+    static const QmlUrlValidator& getUrlValidator() { return validator; }
+    static void setUrlValidator(const QmlUrlValidator& newValidator) { validator = newValidator; }
     static void setSharedContext(QOpenGLContext* context);
 
     OffscreenSurface();
@@ -72,6 +77,7 @@ public:
     QQuickWindow* getWindow();
     QObject* getEventHandler();
     QQmlContext* getSurfaceContext();
+    QQmlFileSelector* getFileSelector();
 
     // Checks to see if a new texture is available.  If one is, the function returns true and
     // textureAndFence will be populated with the texture ID and a fence which will be signalled
@@ -105,6 +111,7 @@ signals:
     void rootItemCreated(QQuickItem* rootContext);
 
 protected:
+    virtual void loadFromQml(const QUrl& qmlSource, QQuickItem* parent, const QJSValue& callback);
     bool eventFilter(QObject* originalDestination, QEvent* event) override;
     bool filterEnabled(QObject* originalDestination, QEvent* event) const;
 

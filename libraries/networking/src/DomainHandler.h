@@ -12,6 +12,8 @@
 #ifndef hifi_DomainHandler_h
 #define hifi_DomainHandler_h
 
+#include <QProcessEnvironment>
+
 #include <QtCore/QJsonObject>
 #include <QtCore/QObject>
 #include <QtCore/QTimer>
@@ -30,10 +32,37 @@
 #include "ReceivedMessage.h"
 #include "NetworkingConstants.h"
 
-const unsigned short DEFAULT_DOMAIN_SERVER_PORT = 40102;
-const unsigned short DEFAULT_DOMAIN_SERVER_DTLS_PORT = 40103;
-const quint16 DOMAIN_SERVER_HTTP_PORT = 40100;
-const quint16 DOMAIN_SERVER_HTTPS_PORT = 40101;
+const unsigned short DEFAULT_DOMAIN_SERVER_PORT = 
+    QProcessEnvironment::systemEnvironment()
+    .contains("HIFI_DOMAIN_SERVER_PORT")
+        ? QProcessEnvironment::systemEnvironment()
+            .value("HIFI_DOMAIN_SERVER_PORT")
+            .toUShort()
+        : 40102;
+
+const unsigned short DEFAULT_DOMAIN_SERVER_DTLS_PORT = 
+    QProcessEnvironment::systemEnvironment()
+    .contains("HIFI_DOMAIN_SERVER_DTLS_PORT")
+        ? QProcessEnvironment::systemEnvironment()
+            .value("HIFI_DOMAIN_SERVER_DTLS_PORT")
+            .toUShort()
+        : 40103;
+
+const quint16 DOMAIN_SERVER_HTTP_PORT = 
+    QProcessEnvironment::systemEnvironment()
+    .contains("HIFI_DOMAIN_SERVER_HTTP_PORT")
+        ? QProcessEnvironment::systemEnvironment()
+            .value("HIFI_DOMAIN_SERVER_HTTP_PORT")
+            .toUInt()
+        : 40100;
+
+const quint16 DOMAIN_SERVER_HTTPS_PORT = 
+    QProcessEnvironment::systemEnvironment()
+    .contains("HIFI_DOMAIN_SERVER_HTTPS_PORT")
+        ? QProcessEnvironment::systemEnvironment()
+            .value("HIFI_DOMAIN_SERVER_HTTPS_PORT")
+            .toUInt()
+        : 40101;
 
 const int MAX_SILENT_DOMAIN_SERVER_CHECK_INS = 5;
 
@@ -42,7 +71,7 @@ class DomainHandler : public QObject {
 public:
     DomainHandler(QObject* parent = 0);
 
-    void disconnect();
+    void disconnect(QString reason);
     void clearSettings();
 
     const QUuid& getUUID() const { return _uuid; }
@@ -105,7 +134,7 @@ public:
 
     bool isSocketKnown() const { return !_sockAddr.getAddress().isNull(); }
 
-    void softReset();
+    void softReset(QString reason);
 
     int getCheckInPacketsSinceLastReply() const { return _checkInPacketsSinceLastReply; }
     bool checkInPacketTimeout();
@@ -210,7 +239,7 @@ signals:
 private:
     bool reasonSuggestsLogin(ConnectionRefusedReason reasonCode);
     void sendDisconnectPacket();
-    void hardReset();
+    void hardReset(QString reason);
 
     bool isHardRefusal(int reasonCode);
 
@@ -231,7 +260,11 @@ private:
     QString _pendingPath;
     QTimer _settingsTimer;
     mutable ReadWriteLockable _interstitialModeSettingLock;
-    Setting::Handle<bool> _enableInterstitialMode{ "enableInterstitialMode", true };
+#ifdef Q_OS_ANDROID
+    Setting::Handle<bool> _enableInterstitialMode{ "enableInterstitialMode", false };
+#else
+    Setting::Handle<bool> _enableInterstitialMode { "enableInterstitialMode", false };
+#endif
 
     QSet<QString> _domainConnectionRefusals;
     bool _hasCheckedForAccessToken { false };

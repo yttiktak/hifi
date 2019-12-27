@@ -12,8 +12,8 @@ import QtQuick 2.5
 
 import "."
 import "./preferences"
-import "../../../styles-uit"
-import "../../../controls-uit" as HifiControls
+import stylesUit 1.0
+import controlsUit 1.0 as HifiControls
 
 Item {
     id: dialog
@@ -30,6 +30,7 @@ Item {
     property bool keyboardRaised: false
     property bool punctuationMode: false
     property bool gotoPreviousApp: false
+    property bool gotoPreviousAppFromScript: false
 
     property var tablet;
   
@@ -42,7 +43,9 @@ Item {
         }
 
         if (HMD.active) {
-            if (gotoPreviousApp) {
+            if (gotoPreviousAppFromScript) {
+                dialog.parent.sendToScript("returnToPreviousApp");
+            } else if (gotoPreviousApp) {
                 tablet.returnToPreviousApp();
             } else {
                 tablet.popFromStack();
@@ -59,7 +62,9 @@ Item {
         }
 
         if (HMD.active) {
-            if (gotoPreviousApp) {
+            if (gotoPreviousAppFromScript) {
+                dialog.parent.sendToScript("returnToPreviousApp");
+            } else if (gotoPreviousApp) {
                 tablet.returnToPreviousApp();
             } else {
                 tablet.popFromStack();
@@ -72,7 +77,9 @@ Item {
     function closeDialog() {
         var tablet = Tablet.getTablet("com.highfidelity.interface.tablet.system");
 
-        if (gotoPreviousApp) {
+        if (gotoPreviousAppFromScript) {
+            dialog.parent.sendToScript("returnToPreviousApp");
+        } else if (gotoPreviousApp) {
             tablet.returnToPreviousApp();
         } else {
             tablet.gotoHomeScreen();
@@ -123,12 +130,12 @@ Item {
                     }
 
                     // Runtime customization of preferences.
-                    var locomotionPreference = findPreference("VR Movement", "Teleporting only / Walking and teleporting");
+                    var locomotionPreference = findPreference("VR Movement", "Walking");
                     var flyingPreference = findPreference("VR Movement", "Jumping and flying");
                     if (locomotionPreference && flyingPreference) {
-                        flyingPreference.visible = (locomotionPreference.value === 1);
+                        flyingPreference.visible = locomotionPreference.value;
                         locomotionPreference.valueChanged.connect(function () {
-                            flyingPreference.visible = (locomotionPreference.value === 1);
+                            flyingPreference.visible = locomotionPreference.value;
                         });
                     }
                     if (HMD.isHeadControllerAvailable("Oculus")) {
@@ -136,6 +143,15 @@ Item {
                         if (boundariesPreference) {
                             boundariesPreference.label = "Show room boundaries and sensors while teleporting";
                         }
+                    }
+
+                    var useKeyboardPreference = findPreference("User Interface", "Use Virtual Keyboard");
+                    var keyboardInputPreference = findPreference("User Interface", "Keyboard laser / mallets");
+                    if (useKeyboardPreference && keyboardInputPreference) {
+                        keyboardInputPreference.visible = useKeyboardPreference.value;
+                        useKeyboardPreference.valueChanged.connect(function() {
+                            keyboardInputPreference.visible = useKeyboardPreference.value;
+                        });
                     }
 
                     if (sections.length) {
@@ -240,6 +256,10 @@ Item {
     Component.onCompleted: {
         tablet = Tablet.getTablet("com.highfidelity.interface.tablet.system");
         keyboardEnabled = HMD.active;
+    }
+
+    Component.onDestruction: {
+        keyboard.raised = false;
     }
 
     onKeyboardRaisedChanged: {

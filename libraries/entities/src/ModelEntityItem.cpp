@@ -39,33 +39,38 @@ ModelEntityItem::ModelEntityItem(const EntityItemID& entityItemID) : EntityItem(
     // set the last animated when interface (re)starts
     _type = EntityTypes::Model;
     _lastKnownCurrentFrame = -1;
-    _color[0] = _color[1] = _color[2] = 0;
     _visuallyReady = false;
 }
 
 const QString ModelEntityItem::getTextures() const {
-    QReadLocker locker(&_texturesLock);
-    auto textures = _textures;
-    return textures;
+    return resultWithReadLock<QString>([&] {
+        return _textures;
+    });
 }
 
 void ModelEntityItem::setTextures(const QString& textures) {
-    QWriteLocker locker(&_texturesLock);
-    _textures = textures;
+    withWriteLock([&] {
+        _needsRenderUpdate |= _textures != textures;
+        _textures = textures;
+    });
 }
 
 EntityItemProperties ModelEntityItem::getProperties(const EntityPropertyFlags& desiredProperties, bool allowEmptyDesiredProperties) const {
     EntityItemProperties properties = EntityItem::getProperties(desiredProperties, allowEmptyDesiredProperties); // get the properties from our base class
-    COPY_ENTITY_PROPERTY_TO_PROPERTIES(color, getXColor);
-    COPY_ENTITY_PROPERTY_TO_PROPERTIES(modelURL, getModelURL);
-    COPY_ENTITY_PROPERTY_TO_PROPERTIES(compoundShapeURL, getCompoundShapeURL);
-    COPY_ENTITY_PROPERTY_TO_PROPERTIES(textures, getTextures);
+
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(shapeType, getShapeType);
+    COPY_ENTITY_PROPERTY_TO_PROPERTIES(compoundShapeURL, getCompoundShapeURL);
+    COPY_ENTITY_PROPERTY_TO_PROPERTIES(color, getColor);
+    COPY_ENTITY_PROPERTY_TO_PROPERTIES(textures, getTextures);
+
+    COPY_ENTITY_PROPERTY_TO_PROPERTIES(modelURL, getModelURL);
+    COPY_ENTITY_PROPERTY_TO_PROPERTIES(modelScale, getModelScale);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(jointRotationsSet, getJointRotationsSet);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(jointRotations, getJointRotations);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(jointTranslationsSet, getJointTranslationsSet);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(jointTranslations, getJointTranslations);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(relayParentJoints, getRelayParentJoints);
+    COPY_ENTITY_PROPERTY_TO_PROPERTIES(groupCulled, getGroupCulled);
     withReadLock([&] {
         _animationProperties.getProperties(properties);
     });
@@ -76,16 +81,19 @@ bool ModelEntityItem::setProperties(const EntityItemProperties& properties) {
     bool somethingChanged = false;
     somethingChanged = EntityItem::setProperties(properties); // set the properties in our base class
 
-    SET_ENTITY_PROPERTY_FROM_PROPERTIES(color, setColor);
-    SET_ENTITY_PROPERTY_FROM_PROPERTIES(modelURL, setModelURL);
-    SET_ENTITY_PROPERTY_FROM_PROPERTIES(compoundShapeURL, setCompoundShapeURL);
-    SET_ENTITY_PROPERTY_FROM_PROPERTIES(textures, setTextures);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(shapeType, setShapeType);
+    SET_ENTITY_PROPERTY_FROM_PROPERTIES(compoundShapeURL, setCompoundShapeURL);
+    SET_ENTITY_PROPERTY_FROM_PROPERTIES(color, setColor);
+    SET_ENTITY_PROPERTY_FROM_PROPERTIES(textures, setTextures);
+
+    SET_ENTITY_PROPERTY_FROM_PROPERTIES(modelURL, setModelURL);
+    SET_ENTITY_PROPERTY_FROM_PROPERTIES(modelScale, setModelScale);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(jointRotationsSet, setJointRotationsSet);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(jointRotations, setJointRotations);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(jointTranslationsSet, setJointTranslationsSet);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(jointTranslations, setJointTranslations);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(relayParentJoints, setRelayParentJoints);
+    SET_ENTITY_PROPERTY_FROM_PROPERTIES(groupCulled, setGroupCulled);
 
     withWriteLock([&] {
         AnimationPropertyGroup animationProperties = _animationProperties;
@@ -117,11 +125,19 @@ int ModelEntityItem::readEntitySubclassDataFromBuffer(const unsigned char* data,
     const unsigned char* dataAt = data;
     bool animationPropertiesChanged = false;
 
-    READ_ENTITY_PROPERTY(PROP_COLOR, rgbColor, setColor);
-    READ_ENTITY_PROPERTY(PROP_MODEL_URL, QString, setModelURL);
+    READ_ENTITY_PROPERTY(PROP_SHAPE_TYPE, ShapeType, setShapeType);
     READ_ENTITY_PROPERTY(PROP_COMPOUND_SHAPE_URL, QString, setCompoundShapeURL);
+    READ_ENTITY_PROPERTY(PROP_COLOR, glm::u8vec3, setColor);
     READ_ENTITY_PROPERTY(PROP_TEXTURES, QString, setTextures);
+
+    READ_ENTITY_PROPERTY(PROP_MODEL_URL, QString, setModelURL);
+    READ_ENTITY_PROPERTY(PROP_MODEL_SCALE, glm::vec3, setModelScale);
+    READ_ENTITY_PROPERTY(PROP_JOINT_ROTATIONS_SET, QVector<bool>, setJointRotationsSet);
+    READ_ENTITY_PROPERTY(PROP_JOINT_ROTATIONS, QVector<glm::quat>, setJointRotations);
+    READ_ENTITY_PROPERTY(PROP_JOINT_TRANSLATIONS_SET, QVector<bool>, setJointTranslationsSet);
+    READ_ENTITY_PROPERTY(PROP_JOINT_TRANSLATIONS, QVector<glm::vec3>, setJointTranslations);
     READ_ENTITY_PROPERTY(PROP_RELAY_PARENT_JOINTS, bool, setRelayParentJoints);
+    READ_ENTITY_PROPERTY(PROP_GROUP_CULLED, bool, setGroupCulled);
 
     // grab a local copy of _animationProperties to avoid multiple locks
     int bytesFromAnimation;
@@ -141,29 +157,26 @@ int ModelEntityItem::readEntitySubclassDataFromBuffer(const unsigned char* data,
     bytesRead += bytesFromAnimation;
     dataAt += bytesFromAnimation;
 
-    READ_ENTITY_PROPERTY(PROP_SHAPE_TYPE, ShapeType, setShapeType);
-
-    READ_ENTITY_PROPERTY(PROP_JOINT_ROTATIONS_SET, QVector<bool>, setJointRotationsSet);
-    READ_ENTITY_PROPERTY(PROP_JOINT_ROTATIONS, QVector<glm::quat>, setJointRotations);
-    READ_ENTITY_PROPERTY(PROP_JOINT_TRANSLATIONS_SET, QVector<bool>, setJointTranslationsSet);
-    READ_ENTITY_PROPERTY(PROP_JOINT_TRANSLATIONS, QVector<glm::vec3>, setJointTranslations);
-
     return bytesRead;
 }
 
 EntityPropertyFlags ModelEntityItem::getEntityProperties(EncodeBitstreamParams& params) const {
     EntityPropertyFlags requestedProperties = EntityItem::getEntityProperties(params);
 
-    requestedProperties += PROP_MODEL_URL;
-    requestedProperties += PROP_COMPOUND_SHAPE_URL;
-    requestedProperties += PROP_TEXTURES;
     requestedProperties += PROP_SHAPE_TYPE;
-    requestedProperties += _animationProperties.getEntityProperties(params);
+    requestedProperties += PROP_COMPOUND_SHAPE_URL;
+    requestedProperties += PROP_COLOR;
+    requestedProperties += PROP_TEXTURES;
+
+    requestedProperties += PROP_MODEL_URL;
+    requestedProperties += PROP_MODEL_SCALE;
     requestedProperties += PROP_JOINT_ROTATIONS_SET;
     requestedProperties += PROP_JOINT_ROTATIONS;
     requestedProperties += PROP_JOINT_TRANSLATIONS_SET;
     requestedProperties += PROP_JOINT_TRANSLATIONS;
     requestedProperties += PROP_RELAY_PARENT_JOINTS;
+    requestedProperties += PROP_GROUP_CULLED;
+    requestedProperties += _animationProperties.getEntityProperties(params);
 
     return requestedProperties;
 }
@@ -178,23 +191,24 @@ void ModelEntityItem::appendSubclassData(OctreePacketData* packetData, EncodeBit
 
     bool successPropertyFits = true;
 
-    APPEND_ENTITY_PROPERTY(PROP_COLOR, getColor());
-    APPEND_ENTITY_PROPERTY(PROP_MODEL_URL, getModelURL());
+    APPEND_ENTITY_PROPERTY(PROP_SHAPE_TYPE, (uint32_t)getShapeType());
     APPEND_ENTITY_PROPERTY(PROP_COMPOUND_SHAPE_URL, getCompoundShapeURL());
+    APPEND_ENTITY_PROPERTY(PROP_COLOR, getColor());
     APPEND_ENTITY_PROPERTY(PROP_TEXTURES, getTextures());
+
+    APPEND_ENTITY_PROPERTY(PROP_MODEL_URL, getModelURL());
+    APPEND_ENTITY_PROPERTY(PROP_MODEL_SCALE, getModelScale());
+    APPEND_ENTITY_PROPERTY(PROP_JOINT_ROTATIONS_SET, getJointRotationsSet());
+    APPEND_ENTITY_PROPERTY(PROP_JOINT_ROTATIONS, getJointRotations());
+    APPEND_ENTITY_PROPERTY(PROP_JOINT_TRANSLATIONS_SET, getJointTranslationsSet());
+    APPEND_ENTITY_PROPERTY(PROP_JOINT_TRANSLATIONS, getJointTranslations());
     APPEND_ENTITY_PROPERTY(PROP_RELAY_PARENT_JOINTS, getRelayParentJoints());
+    APPEND_ENTITY_PROPERTY(PROP_GROUP_CULLED, getGroupCulled());
 
     withReadLock([&] {
         _animationProperties.appendSubclassData(packetData, params, entityTreeElementExtraEncodeData, requestedProperties,
             propertyFlags, propertiesDidntFit, propertyCount, appendState);
     });
-
-    APPEND_ENTITY_PROPERTY(PROP_SHAPE_TYPE, (uint32_t)getShapeType());
-
-    APPEND_ENTITY_PROPERTY(PROP_JOINT_ROTATIONS_SET, getJointRotationsSet());
-    APPEND_ENTITY_PROPERTY(PROP_JOINT_ROTATIONS, getJointRotations());
-    APPEND_ENTITY_PROPERTY(PROP_JOINT_TRANSLATIONS_SET, getJointTranslationsSet());
-    APPEND_ENTITY_PROPERTY(PROP_JOINT_TRANSLATIONS, getJointTranslations());
 }
 
 
@@ -281,21 +295,42 @@ void ModelEntityItem::setModelURL(const QString& url) {
     withWriteLock([&] {
         if (_modelURL != url) {
             _modelURL = url;
-            if (_shapeType == SHAPE_TYPE_STATIC_MESH) {
-                _flags |= Simulation::DIRTY_SHAPE | Simulation::DIRTY_MASS;
-            }
+            _flags |= Simulation::DIRTY_SHAPE | Simulation::DIRTY_MASS;
+            _needsRenderUpdate = true;
         }
     });
 }
 
+glm::vec3 ModelEntityItem::getScaledDimensions() const {
+    glm::vec3 parentScale =  getTransform().getScale();
+    return _unscaledDimensions * parentScale;
+}
+
+void ModelEntityItem::setScaledDimensions(const glm::vec3& value) {
+    glm::vec3 parentScale = getTransform().getScale();
+    setUnscaledDimensions(value / parentScale);
+}
+
+const Transform ModelEntityItem::getTransform() const {
+    bool success;
+    return getTransform(success);
+}
+
+const Transform ModelEntityItem::getTransform(bool& success, int depth) const {
+    const Transform parentTransform = getParentTransform(success, depth);
+    Transform localTransform = getLocalTransform();
+    localTransform.postScale(getModelScale());
+
+    Transform worldTransform;
+    Transform::mult(worldTransform, parentTransform, localTransform);
+
+    return worldTransform;
+}
 void ModelEntityItem::setCompoundShapeURL(const QString& url) {
     withWriteLock([&] {
         if (_compoundShapeURL.get() != url) {
-            ShapeType oldType = computeTrueShapeType();
             _compoundShapeURL.set(url);
-            if (oldType != computeTrueShapeType()) {
-                _flags |= Simulation::DIRTY_SHAPE | Simulation::DIRTY_MASS;
-            }
+            _flags |= Simulation::DIRTY_SHAPE | Simulation::DIRTY_MASS;
         }
     });
 }
@@ -381,11 +416,6 @@ void ModelEntityItem::setAnimationFPS(float value) {
     withWriteLock([&] {
         _animationProperties.setFPS(value);
     });
-}
-
-// virtual
-bool ModelEntityItem::shouldBePhysical() const {
-    return !isDead() && getShapeType() != SHAPE_TYPE_NONE && QUrl(_modelURL).isValid();
 }
 
 void ModelEntityItem::resizeJointArrays(int newSize) {
@@ -519,10 +549,6 @@ QVector<bool> ModelEntityItem::getJointTranslationsSet() const {
     return result;
 }
 
-
-xColor ModelEntityItem::getXColor() const { 
-    xColor color = { _color[RED_INDEX], _color[GREEN_INDEX], _color[BLUE_INDEX] }; return color; 
-}
 bool ModelEntityItem::hasModel() const { 
     return resultWithReadLock<bool>([&] {
         return !_modelURL.isEmpty();
@@ -550,21 +576,36 @@ bool ModelEntityItem::getRelayParentJoints() const {
     });
 }
 
+void ModelEntityItem::setGroupCulled(bool value) {
+    withWriteLock([&] {
+        _needsRenderUpdate |= _groupCulled != value;
+        _groupCulled = value;
+    });
+}
+
+bool ModelEntityItem::getGroupCulled() const {
+    return resultWithReadLock<bool>([&] {
+        return _groupCulled;
+    });
+}
+
 QString ModelEntityItem::getCompoundShapeURL() const {
     return _compoundShapeURL.get();
 }
 
-void ModelEntityItem::setColor(const rgbColor& value) { 
+QString ModelEntityItem::getCollisionShapeURL() const {
+    return getShapeType() == SHAPE_TYPE_COMPOUND ? getCompoundShapeURL() : getModelURL();
+}
+
+void ModelEntityItem::setColor(const glm::u8vec3& value) {
     withWriteLock([&] {
-        memcpy(_color, value, sizeof(_color));
+        _color = value;
     });
 }
 
-void ModelEntityItem::setColor(const xColor& value) {
-    withWriteLock([&] {
-        _color[RED_INDEX] = value.red;
-        _color[GREEN_INDEX] = value.green;
-        _color[BLUE_INDEX] = value.blue;
+glm::u8vec3 ModelEntityItem::getColor() const {
+    return resultWithReadLock<glm::u8vec3>([&] {
+        return _color;
     });
 }
 
@@ -630,30 +671,6 @@ bool ModelEntityItem::getAnimationHold() const {
     });
 }
 
-void ModelEntityItem::setAnimationFirstFrame(float firstFrame) { 
-    withWriteLock([&] {
-        _animationProperties.setFirstFrame(firstFrame);
-    });
-}
-
-float ModelEntityItem::getAnimationFirstFrame() const { 
-    return resultWithReadLock<float>([&] {
-        return _animationProperties.getFirstFrame();
-    });
-}
-
-void ModelEntityItem::setAnimationLastFrame(float lastFrame) { 
-    withWriteLock([&] {
-        _animationProperties.setLastFrame(lastFrame);
-    });
-}
-
-float ModelEntityItem::getAnimationLastFrame() const { 
-    return resultWithReadLock<float>([&] {
-        return _animationProperties.getLastFrame();
-    });
-}
-
 bool ModelEntityItem::getAnimationIsPlaying() const { 
     return resultWithReadLock<bool>([&] {
         return _animationProperties.getRunning();
@@ -713,4 +730,16 @@ bool ModelEntityItem::applyNewAnimationProperties(AnimationPropertyGroup newProp
         _flags |= Simulation::DIRTY_UPDATEABLE;
     }
     return somethingChanged;
+}
+
+glm::vec3 ModelEntityItem::getModelScale() const {
+    return resultWithReadLock<glm::vec3>([&] {
+        return _modelScale;
+    });
+}
+
+void ModelEntityItem::setModelScale(const glm::vec3& modelScale) {
+    withWriteLock([&] {
+        _modelScale = modelScale;
+    });
 }

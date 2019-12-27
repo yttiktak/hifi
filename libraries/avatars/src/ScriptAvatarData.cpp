@@ -278,7 +278,7 @@ AvatarEntityMap ScriptAvatarData::getAvatarEntities() const {
     AvatarEntityMap scriptEntityData;
 
     if (AvatarSharedPointer sharedAvatarData = _avatarData.lock()) {
-        return sharedAvatarData->getAvatarEntityData();
+        return sharedAvatarData->getAvatarEntityDataNonDefault();
     }
 
     return scriptEntityData;
@@ -342,6 +342,14 @@ glm::mat4 ScriptAvatarData::getControllerRightHandMatrix() const {
 // MATRIX PROPERTIES
 // END
 //
+
+bool ScriptAvatarData::getHasPriority() const {
+    if (AvatarSharedPointer sharedAvatarData = _avatarData.lock()) {
+        return sharedAvatarData->getHasPriority();
+    } else {
+        return false;
+    }
+}
 
 glm::quat ScriptAvatarData::getAbsoluteJointRotationInObjectFrame(int index) const {
     if (AvatarSharedPointer sharedAvatarData = _avatarData.lock()) {

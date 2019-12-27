@@ -25,11 +25,13 @@ class SoundCacheScriptingInterface : public ScriptableResourceCache, public Depe
     // Properties are copied over from ResourceCache (see ResourceCache.h for reason).
 
     /**jsdoc
-     * API to manage sound cache resources.
+     * The <code>SoundCache</code> API manages sound cache resources.
+     *
      * @namespace SoundCache
      *
      * @hifi-interface
      * @hifi-client-entity
+     * @hifi-avatar
      * @hifi-server-entity
      * @hifi-assignment-client
      *
@@ -37,6 +39,10 @@ class SoundCacheScriptingInterface : public ScriptableResourceCache, public Depe
      * @property {number} numCached - Total number of cached resource. <em>Read-only.</em>
      * @property {number} sizeTotal - Size in bytes of all resources. <em>Read-only.</em>
      * @property {number} sizeCached - Size in bytes of all cached resources. <em>Read-only.</em>
+     * @property {number} numGlobalQueriesPending - Total number of global queries pending (across all resource cache managers).
+     *     <em>Read-only.</em>
+     * @property {number} numGlobalQueriesLoading - Total number of global queries loading (across all resource cache managers).
+     *     <em>Read-only.</em>
      *
      * @borrows ResourceCache.getResourceList as getResourceList
      * @borrows ResourceCache.updateTotalSize as updateTotalSize

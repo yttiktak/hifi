@@ -44,7 +44,10 @@ try {
 }
 
 function removeFromStoryIDsToMaybeDelete(story_id) {
-    storyIDsToMaybeDelete.splice(storyIDsToMaybeDelete.indexOf(story_id), 1);
+    story_id = parseInt(story_id);
+    if (storyIDsToMaybeDelete.indexOf(story_id) > -1) {
+        storyIDsToMaybeDelete.splice(storyIDsToMaybeDelete.indexOf(story_id), 1);
+    }
     print('storyIDsToMaybeDelete[] now:', JSON.stringify(storyIDsToMaybeDelete));
 }
 
@@ -62,6 +65,7 @@ function onMessage(message) {
     // 2. Although we currently use a single image, we would like to take snapshot, a selfie, a 360 etc. all at the
     //    same time, show the user all of them, and have the user deselect any that they do not want to share.
     //    So we'll ultimately be receiving a set of objects, perhaps with different post processing for each.
+
     if (message.type !== "snapshot") {
         return;
     }
@@ -82,7 +86,7 @@ function onMessage(message) {
                         image_data: imageData,
                         canShare: canShare
                     });
-                });                
+                });
             } else {
                 ui.sendMessage({
                     type: "snapshot",
@@ -271,6 +275,14 @@ var POLAROID_MODEL_URL = 'http://hifi-content.s3.amazonaws.com/alan/dev/Test/sna
 var POLAROID_RATE_LIMIT_MS = 1000;
 var polaroidPrintingIsRateLimited = false;
 
+// force call the gotoPreviousApp on script thead to load snapshot html page.
+var tablet = Tablet.getTablet("com.highfidelity.interface.tablet.system");
+tablet.fromQml.connect(function(message) {
+    if (message === 'returnToPreviousApp') {
+	tablet.returnToPreviousApp();
+    }
+});
+
 function printToPolaroid(image_url) {
     // Rate-limit printing
     if (polaroidPrintingIsRateLimited) {
@@ -312,9 +324,7 @@ function printToPolaroid(image_url) {
         "dynamic": true, 
         "collisionsWillMove": true,
 
-        "userData": {
-            "grabbableKey": { "grabbable" : true }
-        }
+        "grab": { "grabbable": true }
     };
     
     var polaroid = Entities.addEntity(properties);
@@ -335,11 +345,13 @@ function fillImageDataFromPrevious() {
     var previousAnimatedSnapStoryID = Settings.getValue("previousAnimatedSnapStoryID");
     var previousAnimatedSnapBlastingDisabled = Settings.getValue("previousAnimatedSnapBlastingDisabled");
     var previousAnimatedSnapHifiSharingDisabled = Settings.getValue("previousAnimatedSnapHifiSharingDisabled");
+
     snapshotOptions = {
         containsGif: previousAnimatedSnapPath !== "",
         processingGif: false,
         shouldUpload: false,
-        canBlast: snapshotDomainID === Settings.getValue("previousSnapshotDomainID"),
+        canBlast: snapshotDomainID === Settings.getValue("previousSnapshotDomainID") &&
+            snapshotDomainID === location.domainID,
         isLoggedIn: isLoggedIn
     };
     imageData = [];
@@ -371,7 +383,8 @@ function snapshotUploaded(isError, reply) {
             isGif = fileExtensionMatches(imageURL, "gif"),
             ignoreGifSnapshotData = false,
             ignoreStillSnapshotData = false;
-        storyIDsToMaybeDelete.push(storyID);
+        storyIDsToMaybeDelete.push(parseInt(storyID));
+        print('storyIDsToMaybeDelete[] now:', JSON.stringify(storyIDsToMaybeDelete));
         if (isGif) {
             if (mostRecentGifSnapshotFilename !== replyJson.user_story.details.original_image_file_name) {
                 ignoreGifSnapshotData = true;

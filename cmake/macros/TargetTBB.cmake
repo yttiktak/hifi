@@ -13,12 +13,12 @@ if (ANDROID)
     set(TBB_LIBRARY ${TBB_INSTALL_DIR}/lib/release/libtbb.so CACHE FILEPATH "TBB library location")
     set(TBB_MALLOC_LIBRARY ${TBB_INSTALL_DIR}/lib/release/libtbbmalloc.so CACHE FILEPATH "TBB malloc library location")
     set(TBB_LIBRARIES ${TBB_LIBRARY} ${TBB_MALLOC_LIBRARY})
+    target_include_directories(${TARGET_NAME} SYSTEM PUBLIC ${TBB_INCLUDE_DIRS})
+    target_link_libraries(${TARGET_NAME} ${TBB_LIBRARIES})
 else()
-    add_dependency_external_projects(tbb)
-    find_package(TBB REQUIRED)
+   	# using VCPKG for TBB
+    find_package(TBB CONFIG REQUIRED)
+    target_link_libraries(${TARGET_NAME} TBB::tbb)
 endif()
-
-target_link_libraries(${TARGET_NAME} ${TBB_LIBRARIES})
-target_include_directories(${TARGET_NAME} SYSTEM PUBLIC ${TBB_INCLUDE_DIRS})
 
 endmacro()

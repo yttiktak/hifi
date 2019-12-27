@@ -33,6 +33,7 @@ OffscreenGLCanvas::OffscreenGLCanvas() :
     _context(new QOpenGLContext),
     _offscreenSurface(new QOffscreenSurface)
 {
+    setFormat(getDefaultOpenGLSurfaceFormat());
 }
 
 OffscreenGLCanvas::~OffscreenGLCanvas() {
@@ -49,67 +50,32 @@ OffscreenGLCanvas::~OffscreenGLCanvas() {
 
 }
 
+void OffscreenGLCanvas::setFormat(const QSurfaceFormat& format) {
+    _context->setFormat(format);
+}
+    
 bool OffscreenGLCanvas::create(QOpenGLContext* sharedContext) {
     if (nullptr != sharedContext) {
         sharedContext->doneCurrent();
         _context->setShareContext(sharedContext);
     }
-    _context->setFormat(getDefaultOpenGLSurfaceFormat());
     if (!_context->create()) {
         qFatal("Failed to create OffscreenGLCanvas context");
     }
 
     _offscreenSurface->setFormat(_context->format());
     _offscreenSurface->create();
-
-    // Due to a https://bugreports.qt.io/browse/QTBUG-65125 we can't rely on `isValid`
-    // to determine if the offscreen surface was successfully created, so we use
-    // makeCurrent as a proxy test.  Bug is fixed in Qt 5.9.4
-#if defined(Q_OS_ANDROID)
-    if (!_context->makeCurrent(_offscreenSurface)) {
-        qFatal("Unable to make offscreen surface current");
-    }
-#else
     if (!_offscreenSurface->isValid()) {
         qFatal("Offscreen surface is invalid");
     }
-#endif
-    
-    if (gl::Context::enableDebugLogger()) {
-        _context->makeCurrent(_offscreenSurface);
-        QOpenGLDebugLogger *logger = new QOpenGLDebugLogger(this);
-        connect(logger, &QOpenGLDebugLogger::messageLogged, this, &OffscreenGLCanvas::onMessageLogged);
-        logger->initialize();
-        logger->enableMessages();
-        logger->startLogging(QOpenGLDebugLogger::SynchronousLogging);
-        _context->doneCurrent();
-    }
-
     return true;
-}
-
-void OffscreenGLCanvas::onMessageLogged(const QOpenGLDebugMessage& debugMessage) {
-    auto severity = debugMessage.severity(); 
-    switch (severity) {
-    case QOpenGLDebugMessage::NotificationSeverity:
-    case QOpenGLDebugMessage::LowSeverity:
-        return;
-    default:
-        break;
-    }
-    qDebug(glLogging) << debugMessage;
-    return;
 }
 
 bool OffscreenGLCanvas::makeCurrent() {
     bool result = _context->makeCurrent(_offscreenSurface);
-    if (glGetString) {
+    if (result) {
         std::call_once(_reportOnce, [] {
-            qCDebug(glLogging) << "GL Version: " << QString((const char*)glGetString(GL_VERSION));
-            qCDebug(glLogging) << "GL Shader Language Version: "
-                               << QString((const char*)glGetString(GL_SHADING_LANGUAGE_VERSION));
-            qCDebug(glLogging) << "GL Vendor: " << QString((const char*)glGetString(GL_VENDOR));
-            qCDebug(glLogging) << "GL Renderer: " << QString((const char*)glGetString(GL_RENDERER));
+            LOG_GL_CONTEXT_INFO(glLogging, gl::ContextInfo().init());
         });
     }
 

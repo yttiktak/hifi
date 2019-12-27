@@ -18,7 +18,9 @@
 #include <QtCore/QTimer>
 
 #include <LogHandler.h>
+#include <shared/QtHelpers.h>
 
+#include <platform/Platform.h>
 #include "NetworkLogging.h"
 
 ThreadedAssignment::ThreadedAssignment(ReceivedMessage& message) :
@@ -27,6 +29,9 @@ ThreadedAssignment::ThreadedAssignment(ReceivedMessage& message) :
     _domainServerTimer(this),
     _statsTimer(this)
 {
+    // use <mixer-type> as a temporary targetName name until commonInit can be called later
+    LogHandler::getInstance().setTargetName(QString("<%1>").arg(getTypeName()));
+
     static const int STATS_TIMEOUT_MS = 1000;
     _statsTimer.setInterval(STATS_TIMEOUT_MS); // 1s, Qt::CoarseTimer acceptable
     connect(&_statsTimer, &QTimer::timeout, this, &ThreadedAssignment::sendStatsPacket);
@@ -37,6 +42,16 @@ ThreadedAssignment::ThreadedAssignment(ReceivedMessage& message) :
     // if the NL tells us we got a DS response, clear our member variable of queued check-ins
     auto nodeList = DependencyManager::get<NodeList>();
     connect(nodeList.data(), &NodeList::receivedDomainServerList, this, &ThreadedAssignment::clearQueuedCheckIns);
+
+    platform::create();
+    if (!platform::enumeratePlatform()) {
+        qCDebug(networking) << "Failed to enumerate platform.";
+    }
+}
+
+ThreadedAssignment::~ThreadedAssignment() {
+    stop();
+    platform::destroy();
 }
 
 void ThreadedAssignment::setFinished(bool isFinished) {
@@ -58,7 +73,7 @@ void ThreadedAssignment::setFinished(bool isFinished) {
             packetReceiver.setShouldDropPackets(true);
 
             // send a disconnect packet to the domain
-            nodeList->getDomainHandler().disconnect();
+            nodeList->getDomainHandler().disconnect("Finished");
 
             // stop our owned timers
             _domainServerTimer.stop();
@@ -94,17 +109,22 @@ void ThreadedAssignment::commonInit(const QString& targetName, NodeType_t nodeTy
 void ThreadedAssignment::addPacketStatsAndSendStatsPacket(QJsonObject statsObject) {
     auto nodeList = DependencyManager::get<NodeList>();
 
-    float packetsInPerSecond, bytesInPerSecond, packetsOutPerSecond, bytesOutPerSecond;
-    nodeList->getPacketStats(packetsInPerSecond, bytesInPerSecond, packetsOutPerSecond, bytesOutPerSecond);
-    nodeList->resetPacketStats();
+#ifdef DEBUG_EVENT_QUEUE
+    statsObject["nodelist_event_queue_size"] = ::hifi::qt::getEventQueueSize(nodeList->thread());
+#endif
 
     QJsonObject ioStats;
-    ioStats["inbound_bytes_per_s"] = bytesInPerSecond;
-    ioStats["inbound_packets_per_s"] = packetsInPerSecond;
-    ioStats["outbound_bytes_per_s"] = bytesOutPerSecond;
-    ioStats["outbound_packets_per_s"] = packetsOutPerSecond;
+    ioStats["inbound_kbps"] = nodeList->getInboundKbps();
+    ioStats["inbound_pps"] = nodeList->getInboundPPS();
+    ioStats["outbound_kbps"] = nodeList->getOutboundKbps();
+    ioStats["outbound_pps"] = nodeList->getOutboundPPS();
 
     statsObject["io_stats"] = ioStats;
+
+    QJsonObject assignmentStats;
+    assignmentStats["numQueuedCheckIns"] = _numQueuedCheckIns;
+
+    statsObject["assignmentStats"] = assignmentStats;
 
     nodeList->sendStatsToDomainServer(statsObject);
 }
@@ -123,10 +143,16 @@ void ThreadedAssignment::checkInWithDomainServerOrExit() {
         stop();
     } else {
         auto nodeList = DependencyManager::get<NodeList>();
-        QMetaObject::invokeMethod(nodeList.data(), "sendDomainServerCheckIn");
+        // Call sendDomainServerCheckIn directly instead of putting it on
+        // the event queue.  Under high load, the event queue can back up
+        // longer than the total timeout period and cause a restart
+        nodeList->sendDomainServerCheckIn();
 
         // increase the number of queued check ins
         _numQueuedCheckIns++;
+        if (_numQueuedCheckIns > 1) {
+            qCDebug(networking) << "Number of queued checkins = " << _numQueuedCheckIns;
+        }
     }
 }
 

@@ -16,52 +16,76 @@ $(document).ready(function(){
 
   Settings.extraGroupsAtEnd = Settings.extraDomainGroupsAtEnd;
   Settings.extraGroupsAtIndex = Settings.extraDomainGroupsAtIndex;
+  var METAVERSE_URL = URLs.METAVERSE_URL;
 
-  Settings.afterReloadActions = function() {
-    // append the domain selection modal
-    appendDomainIDButtons();
+  var SSL_PRIVATE_KEY_FILE_ID = 'ssl-private-key-file';
+  var SSL_PRIVATE_KEY_CONTENTS_ID = 'key-contents';
+  var SSL_PRIVATE_KEY_CONTENTS_NAME = 'oauth.key-contents';
+  var SSL_CERT_UPLOAD_ID = 'ssl-cert-button';
+  var SSL_CERT_FILE_ID = 'ssl-cert-file';
+  var SSL_CERT_FINGERPRINT_ID = 'cert-fingerprint';
+  var SSL_CERT_FINGERPRINT_SPAN_ID = 'cert-fingerprint-span-id';
+  var SSL_CERT_CONTENTS_ID = 'cert-contents';
+  var SSL_CERT_CONTENTS_NAME = 'oauth.cert-contents';
+  var SSL_PRIVATE_KEY_PATH = 'oauth.key';
+  var SSL_CERT_PATH = 'oauth.cert';
 
-    // call our method to setup the HF account button
-    setupHFAccountButton();
+  Settings.afterReloadActions = function(data) {
 
-    // call our method to setup the place names table
-    setupPlacesTable();
+    getMetaverseUrl(function(metaverse_url) {
+      METAVERSE_URL = metaverse_url;
 
-    setupDomainNetworkingSettings();
-    // setupDomainLabelSetting();
+      // call our method to setup the HF account button
+      setupHFAccountButton();
 
-    setupSettingsBackup();
+      // call our method to setup the place names table
+      setupPlacesTable();
 
-    if (domainIDIsSet()) {
-      // now, ask the API for what places, if any, point to this domain
-      reloadDomainInfo();
+      setupDomainNetworkingSettings();
+      // setupDomainLabelSetting();
 
-      // we need to ask the API what a shareable name for this domain is
-      getShareName(function(success, shareName) {
-        if (success) {
-          var shareLink = "https://hifi.place/" + shareName;
-          $('#visit-domain-link').attr("href", shareLink).show();
-        }
-      });
-    }
+      setupSettingsOAuth(data);
 
-    if (Settings.data.values.wizard.cloud_domain) {
-      $('#manage-cloud-domains-link').show();
+      setupSettingsBackup();
 
-      var cloudWizardExit = qs["cloud-wizard-exit"];
-      if (cloudWizardExit != undefined) {
-        $('#cloud-domains-alert').show();
+      if (domainIDIsSet()) {
+        // now, ask the API for what places, if any, point to this domain
+        reloadDomainInfo();
+
+        // we need to ask the API what a shareable name for this domain is
+        getShareName(function(success, shareName) {
+          if (success) {
+            var shareLink = "https://hifi.place/" + shareName;
+            $('#visit-domain-link').attr("href", shareLink).show();
+          }
+        });
+      } else if (accessTokenIsSet()) {
+        $('#' + Settings.GET_TEMPORARY_NAME_BTN_ID).show();
       }
-    }
 
-    handleAction();
+      if (Settings.data.values.wizard.cloud_domain) {
+        $('#manage-cloud-domains-link').show();
+
+        var cloudWizardExit = qs["cloud-wizard-exit"];
+        if (cloudWizardExit != undefined) {
+          $('#cloud-domains-alert').show();
+        }
+
+        $(Settings.DOMAIN_ID_SELECTOR).siblings('span').append("</br><strong>Changing the domain ID for a Cloud Domain may result in an incorrect status for the domain on your Cloud Domains page.</strong>");
+      } else {
+        // append the domain selection modal
+        appendDomainIDButtons();
+      }
+
+      handleAction();
+    });
   }
 
   Settings.handlePostSettings = function(formJSON) {
       
-      if (!verifyAvatarHeights()) {
-          return false;
-      }
+    if (!verifyAvatarHeights()) {
+        return false;
+    }
 	  
     // check if we've set the basic http password
     if (formJSON["security"]) {
@@ -114,6 +138,48 @@ $(document).ready(function(){
       }
     }
 
+    if (formJSON["oauth"]) {
+      var private_key = formJSON["oauth"]["key-contents"];
+      var cert = formJSON["oauth"]["cert-contents"];
+      var oauthErrors = "";
+      if (private_key != undefined) {
+        var pattern = /-+BEGIN PRIVATE KEY-+[A-Za-z0-9+/\n=]*-+END PRIVATE KEY-+/m;
+        if (!pattern.test(private_key)) {
+          oauthErrors += "Private key must be in PEM format<BR/>";
+        }
+      }
+      if (cert != undefined) {
+        var pattern = /-+BEGIN CERTIFICATE-+[A-Za-z0-9+/\n=]*-+END CERTIFICATE-+/m;
+        if (!pattern.test(cert)) {
+          oauthErrors += "Certificate must be in PEM format<BR/>";
+        }
+      }
+      if ($('#oauth.panel').length) {
+        if (!$('input[name="oauth.client-id"]').val()) {
+          oauthErrors += "OAuth requires a client Id.<BR/>";
+        }
+        if (!$('input[name="oauth.provider"]').val()) {
+          oauthErrors += "OAuth requires a provider.<BR/>";
+        }
+        if (!$('input[name="oauth.hostname"]').val()) {
+          oauthErrors += "OAuth requires a hostname.<BR/>";
+        }
+        if (!$('input[name="' + SSL_PRIVATE_KEY_PATH + '"]').val() && !$('input[name="' + SSL_PRIVATE_KEY_CONTENTS_NAME + '"]').val()) {
+          oauthErrors += "OAuth requires an SSL Private Key.<BR/>";
+        }
+        if (!$('input[name="' + SSL_CERT_PATH + '"]').val() && !$('input[name="' + SSL_CERT_CONTENTS_NAME + '"]').val()) {
+          oauthErrors += "OAuth requires an SSL Certificate.<BR/>";
+        }
+        if (!$("table[name='oauth.admin-users'] tr.value-row").length &&
+            !$("table[name='oauth.admin-roles'] tr.value-row").length) {
+          oauthErrors += "OAuth must have at least one admin user or admin role.<BR/>";
+        }
+      }
+      if (oauthErrors) {
+        bootbox.alert({ "message": oauthErrors, "title": "OAuth Configuration Error" });
+        return false;
+      }
+    }
     postSettings(formJSON);
   };
 
@@ -256,7 +322,7 @@ $(document).ready(function(){
       buttonSetting.button_label = "Connect High Fidelity Account";
       buttonSetting.html_id = Settings.CONNECT_ACCOUNT_BTN_ID;
 
-      buttonSetting.href = URLs.METAVERSE_URL + "/user/tokens/new?for_domain_server=true";
+      buttonSetting.href = METAVERSE_URL + "/user/tokens/new?for_domain_server=true";
 
       // since we do not have an access token we change hide domain ID and auto networking settings
       // without an access token niether of them can do anything
@@ -540,6 +606,9 @@ $(document).ready(function(){
       var address = DomainInfo.network_address === null ? '' : DomainInfo.network_address;
       var port = DomainInfo.network_port === null ? '' : DomainInfo.network_port;
       var modal_body = "<div class='form-group'>";
+      if (isCloudDomain()) {
+        modal_body += '<div style="color:red;font-weight: bold">Changing the network settings may actually break your domain.</div>';
+      }
       if (includeAddress) {
         modal_body += "<label class='control-label'>Address</label>";
         modal_body += "<input type='text' id='network-address-input' class='form-control' value='" + address + "'>";
@@ -643,7 +712,7 @@ $(document).ready(function(){
       label: 'Places',
       html_id: Settings.PLACES_TABLE_ID,
       help: "The following places currently point to this domain.</br>To point places to this domain, "
-        + " go to the <a href='" + URLs.METAVERSE_URL + "/user/places'>My Places</a> "
+        + " go to the <a href='" + METAVERSE_URL + "/user/places'>My Places</a> "
         + "page in your High Fidelity Metaverse account.",
       read_only: true,
       can_add_new_rows: false,
@@ -676,12 +745,9 @@ $(document).ready(function(){
     var errorEl = createDomainLoadingError("There was an error retrieving your places.");
     $("#" + Settings.PLACES_TABLE_ID).after(errorEl);
 
-    // do we have a domain ID?
-    if (!domainIDIsSet()) {
-      // we don't have a domain ID - add a button to offer the user a chance to get a temporary one
-      var temporaryPlaceButton = dynamicButton(Settings.GET_TEMPORARY_NAME_BTN_ID, 'Get a temporary place name');
-      $('#' + Settings.PLACES_TABLE_ID).after(temporaryPlaceButton);
-    }
+    var temporaryPlaceButton = dynamicButton(Settings.GET_TEMPORARY_NAME_BTN_ID, 'Get a temporary place name');
+    temporaryPlaceButton.hide();
+    $('#' + Settings.PLACES_TABLE_ID).after(temporaryPlaceButton);
     if (accessTokenIsSet()) {
       appendAddButtonToPlacesTable();
     }
@@ -772,8 +838,9 @@ $(document).ready(function(){
 
       // check if we have owner_places (for a real domain) or a name (for a temporary domain)
       if (data.status == "success") {
+        $('#' + Settings.GET_TEMPORARY_NAME_BTN_ID).hide();
         $('.domain-loading-hide').show();
-        if (data.domain.owner_places) {
+        if (data.domain.owner_places && data.domain.owner_places.length > 0) {
           // add a table row for each of these names
           _.each(data.domain.owner_places, function(place){
             $('#' + Settings.PLACES_TABLE_ID + " tbody").append(placeTableRowForPlaceObject(place));
@@ -781,8 +848,9 @@ $(document).ready(function(){
         } else if (data.domain.name) {
           // add a table row for this temporary domain name
           $('#' + Settings.PLACES_TABLE_ID + " tbody").append(placeTableRow(data.domain.name, '/', true));
+        } else {
+          $('#' + Settings.GET_TEMPORARY_NAME_BTN_ID).show();
         }
-
         // Update label
         if (showOrHideLabel()) {
           var label = data.domain.label;
@@ -800,6 +868,10 @@ $(document).ready(function(){
           } else if (autoNetworkingSetting === 'ip') {
             $('#network-address-port input').val(port);
           }
+        }
+
+        if (getCurrentDomainIDType() === DOMAIN_ID_TYPE_TEMP) {
+          $(Settings.DOMAIN_ID_SELECTOR).siblings('span').append("  <b>This is a temporary domain and will not be visible in your domain list.</b>");
         }
 
         if (accessTokenIsSet()) {
@@ -951,7 +1023,7 @@ $(document).ready(function(){
             modal_buttons["success"] = {
               label: 'Create new domain',
               callback: function() {
-                window.open(URLs.METAVERSE_URL + "/user/domains", '_blank');
+                window.open(METAVERSE_URL + "/user/domains", '_blank');
               }
             }
             modal_body = "<p>You do not have any domains in your High Fidelity account." +
@@ -999,7 +1071,7 @@ $(document).ready(function(){
         showSpinnerAlert('Creating temporary place name');
 
         // make a get request to get a temporary domain
-        $.post(URLs.METAVERSE_URL + '/api/v1/domains/temporary', function(data){
+        $.post(METAVERSE_URL + '/api/v1/domains/temporary', function(data){
           if (data.status == "success") {
             var domain = data.data.domain;
 
@@ -1023,6 +1095,67 @@ $(document).ready(function(){
           }
         });
       }
+    });
+  }
+
+  function setupSettingsOAuth(data) {
+    // construct the HTML needed for the settings backup panel
+    var html = "<div class='form-group undefined'>";
+    html += "<label class='control-label'>SSL Private Key</label><BR/>";
+    html += "<label id='key-path-label'class='control-label'>Path</label>";
+    html += "<input id='" + SSL_PRIVATE_KEY_FILE_ID + "' type='file' accept='.key'/>";
+    html += "<input id='" + SSL_PRIVATE_KEY_CONTENTS_ID + "' name='" + SSL_PRIVATE_KEY_CONTENTS_NAME + "' type='hidden'/>";
+    html += "</div>";
+    html += "<div class='form-group undefined'>";
+    html += "<label class='control-label'>SSL Cert</label>";
+    html += "<div id='cert-fingerprint'><b>Fingerprint:</b><span id='" + SSL_CERT_FINGERPRINT_SPAN_ID + "'>" + data.values.oauth["cert-fingerprint"] + "</span></div>";
+    html += "<label id='cert-path-label' class='control-label'>Path</label>";
+    html += "<input id='" + SSL_CERT_FILE_ID + "' type='file' accept='.cer,.crt'/>";
+    html += "<input id='" + SSL_CERT_CONTENTS_ID + "' name='" + SSL_CERT_CONTENTS_NAME + "' type='hidden'/>";
+    html += "</div>";
+
+    $('#oauth-advanced').append(html);
+
+    $('#key-path-label').after($('[data-keypath="' + SSL_PRIVATE_KEY_PATH + '"]'));
+    $('#cert-path-label').after($('[data-keypath="' + SSL_CERT_PATH + '"]'));
+    $('[name="' + SSL_PRIVATE_KEY_PATH + '"]').val(data.values.oauth.key);
+    $('[name="' + SSL_CERT_PATH + '"]').val(data.values.oauth.cert);
+
+    $('body').on('change input propertychange', '#' + SSL_PRIVATE_KEY_FILE_ID, function(e){
+      var f = e.target.files[0];
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        $('#' + SSL_PRIVATE_KEY_CONTENTS_ID).val(reader.result);
+        $('#' + SSL_PRIVATE_KEY_CONTENTS_ID).attr('data-changed', true);
+        $('[name="' + SSL_PRIVATE_KEY_PATH + '"]').val('');
+        badgeForDifferences($('#' + SSL_PRIVATE_KEY_CONTENTS_ID));
+      }
+      reader.readAsText(f);
+    });
+    $('body').on('change input propertychange', '#' + SSL_CERT_FILE_ID, function(e){
+      var f = e.target.files[0];
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        $('#' + SSL_CERT_CONTENTS_ID).val(reader.result);
+        $('#' + SSL_CERT_CONTENTS_ID).attr('data-changed', true);
+        $('[name="' + SSL_CERT_PATH + '"]').val('');
+        $('#' + SSL_CERT_FINGERPRINT_SPAN_ID).text('');
+        badgeForDifferences($('#' + SSL_CERT_CONTENTS_ID));
+      }
+      reader.readAsText(f);
+    });
+
+    $('body').on('change input propertychange', '[name="' + SSL_PRIVATE_KEY_PATH + '"]', function(e){
+      $('#' + SSL_PRIVATE_KEY_FILE_ID).val('');
+      $('#' + SSL_PRIVATE_KEY_CONTENTS_ID).val('');
+      badgeForDifferences($('[name="' + SSL_PRIVATE_KEY_PATH + '"]').attr('data-changed', true));
+    });
+
+    $('body').on('change input propertychange', '[name="' + SSL_CERT_PATH + '"]', function(e){
+      $('#' + SSL_CERT_FILE_ID).val('');
+      $('#' + SSL_CERT_CONTENTS_ID).val('');
+      $('#' + SSL_CERT_FINGERPRINT_SPAN_ID).text('');
+      badgeForDifferences($('[name="' + SSL_CERT_PATH + '"]').attr('data-changed', true));
     });
   }
 

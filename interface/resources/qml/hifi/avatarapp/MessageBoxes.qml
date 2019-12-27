@@ -56,25 +56,12 @@ MessageBox {
         popup.inputText.forceActiveFocus();
     }
 
-    property url getWearablesUrl: '../../../images/avatarapp/AvatarIsland.jpg'
-
     function showGetWearables(callback, linkCallback) {
-        popup.button2text = 'AvatarIsland'
-        popup.dialogButtons.yesButton.fontCapitalization = Font.MixedCase;
+        popup.dialogButtons.yesButton.visible = false;
         popup.button1text = 'CANCEL'
         popup.titleText = 'Get Wearables'
-        popup.bodyText = 'Buy wearables from <b><a href="app://marketplace">Marketplace.</a></b>' + '<br/>' +
-                'Wear wearable from <b><a href="app://purchases">My Purchases.</a></b>' + '<br/>' + '<br/>' +
-                'Visit “AvatarIsland” to get wearables'
-
-        popup.imageSource = getWearablesUrl;
-        popup.onButton2Clicked = function() {
-            popup.close();
-
-            if (callback) {
-                callback();
-            }
-        }
+        popup.bodyText = 'Get wearables from <b><a href="app://marketplace">Marketplace.</a></b>' + '<br/>' +
+                'Wear wearable from <b><a href="app://purchases">Inventory.</a></b>'
 
         popup.onLinkClicked = function(link) {
             popup.close();
@@ -89,7 +76,7 @@ MessageBox {
 
     function showDeleteFavorite(favoriteName, callback) {
         popup.titleText = 'Delete Favorite: {AvatarName}'.replace('{AvatarName}', favoriteName)
-        popup.bodyText = 'This will delete your favorite. You will retain access to the wearables and avatar that made up the favorite from My Purchases.'
+        popup.bodyText = 'This will delete your favorite. You will retain access to the wearables and avatar that made up the favorite from Inventory.'
         popup.imageSource = null;
         popup.button1text = 'CANCEL'
         popup.button2text = 'DELETE'
@@ -120,26 +107,13 @@ MessageBox {
         popup.open();
     }
 
-    property url getAvatarsUrl: '../../../images/avatarapp/BodyMart.PNG'
-
     function showBuyAvatars(callback, linkCallback) {
-        popup.button2text = 'BodyMart'
-        popup.dialogButtons.yesButton.fontCapitalization = Font.MixedCase;
+        popup.dialogButtons.yesButton.visible = false;
         popup.button1text = 'CANCEL'
         popup.titleText = 'Get Avatars'
 
-        popup.bodyText = 'Buy avatars from <b><a href="app://marketplace">Marketplace.</a></b>' + '<br/>' +
-                         'Wear avatars in <b><a href="app://purchases">My Purchases.</a></b>' + '<br/>' + '<br/>' +
-                         'Visit “BodyMart” to get free avatars.'
-
-        popup.imageSource = getAvatarsUrl;
-        popup.onButton2Clicked = function() {
-            popup.close();
-
-            if (callback) {
-                callback();
-            }
-        }
+        popup.bodyText = 'Get avatars from <b><a href="app://marketplace">Marketplace.</a></b>' + '<br/>' +
+                         'Wear avatars in <b><a href="app://purchases">Inventory.</a></b>'
 
         popup.onLinkClicked = function(link) {
             popup.close();

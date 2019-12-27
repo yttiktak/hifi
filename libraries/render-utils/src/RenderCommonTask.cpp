@@ -45,13 +45,13 @@ void EndGPURangeTimer::run(const render::RenderContextPointer& renderContext, co
     config->setGPUBatchRunTime(timer->getGPUAverage(), timer->getBatchAverage());
 }
 
-DrawOverlay3D::DrawOverlay3D(bool opaque) :
+DrawLayered3D::DrawLayered3D(bool opaque) :
     _shapePlumber(std::make_shared<ShapePlumber>()),
     _opaquePass(opaque) {
     initForwardPipelines(*_shapePlumber);
 }
 
-void DrawOverlay3D::run(const RenderContextPointer& renderContext, const Inputs& inputs) {
+void DrawLayered3D::run(const RenderContextPointer& renderContext, const Inputs& inputs) {
     assert(renderContext->args);
     assert(renderContext->args->hasViewFrustum());
 
@@ -59,18 +59,26 @@ void DrawOverlay3D::run(const RenderContextPointer& renderContext, const Inputs&
 
     const auto& inItems = inputs.get0();
     const auto& lightingModel = inputs.get1();
-    const auto jitter = inputs.get2();
+    const auto& hazeFrame = inputs.get2();
+    const auto jitter = inputs.get3();
     
     config->setNumDrawn((int)inItems.size());
     emit config->numDrawnChanged();
 
     RenderArgs* args = renderContext->args;
 
+    graphics::HazePointer haze;
+    const auto& hazeStage = renderContext->args->_scene->getStage<HazeStage>();
+    if (hazeStage && hazeFrame->_hazes.size() > 0) {
+        // We use _hazes.back() here because the last haze object will always have haze disabled.
+        haze = hazeStage->getHaze(hazeFrame->_hazes.back());
+    }
+
     // Clear the framebuffer without stereo
     // Needs to be distinct from the other batch because using the clear call 
     // while stereo is enabled triggers a warning
     if (_opaquePass) {
-        gpu::doInBatch("DrawOverlay3D::run::clear", args->_context, [&](gpu::Batch& batch) {
+        gpu::doInBatch("DrawLayered3D::run::clear", args->_context, [&](gpu::Batch& batch) {
             batch.enableStereo(false);
             batch.clearFramebuffer(gpu::Framebuffer::BUFFER_DEPTH, glm::vec4(), 1.f, 0, false);
         });
@@ -78,7 +86,7 @@ void DrawOverlay3D::run(const RenderContextPointer& renderContext, const Inputs&
 
     if (!inItems.empty()) {
         // Render the items
-        gpu::doInBatch("DrawOverlay3D::main", args->_context, [&](gpu::Batch& batch) {
+        gpu::doInBatch("DrawLayered3D::main", args->_context, [&](gpu::Batch& batch) {
             args->_batch = &batch;
             batch.setViewportTransform(args->_viewport);
             batch.setStateScissorRect(args->_viewport);
@@ -94,36 +102,20 @@ void DrawOverlay3D::run(const RenderContextPointer& renderContext, const Inputs&
 
             // Setup lighting model for all items;
             batch.setUniformBuffer(ru::Buffer::LightModel, lightingModel->getParametersBuffer());
+            batch.setResourceTexture(ru::Texture::AmbientFresnel, lightingModel->getAmbientFresnelLUT());
 
-            renderShapes(renderContext, _shapePlumber, inItems, _maxDrawn);
+            if (haze) {
+                batch.setUniformBuffer(graphics::slot::buffer::Buffer::HazeParams, haze->getHazeParametersBuffer());
+            }
+
+            if (_opaquePass) {
+                renderStateSortShapes(renderContext, _shapePlumber, inItems, _maxDrawn);
+            } else {
+                renderShapes(renderContext, _shapePlumber, inItems, _maxDrawn);
+            }
             args->_batch = nullptr;
         });
     }
-}
-
-void CompositeHUD::run(const RenderContextPointer& renderContext) {
-    assert(renderContext->args);
-    assert(renderContext->args->_context);
-
-    // We do not want to render HUD elements in secondary camera
-    if (renderContext->args->_renderMode == RenderArgs::RenderMode::SECONDARY_CAMERA_RENDER_MODE) {
-        return;
-    }
-
-    // Grab the HUD texture
-#if !defined(DISABLE_QML)
-    gpu::doInBatch("CompositeHUD", renderContext->args->_context, [&](gpu::Batch& batch) {
-        glm::mat4 projMat;
-        Transform viewMat;
-        renderContext->args->getViewFrustum().evalProjectionMatrix(projMat);
-        renderContext->args->getViewFrustum().evalViewTransform(viewMat);
-        batch.setProjectionTransform(projMat);
-        batch.setViewTransform(viewMat, true);
-        if (renderContext->args->_hudOperator) {
-            renderContext->args->_hudOperator(batch, renderContext->args->_hudTexture, renderContext->args->_renderMode == RenderArgs::RenderMode::MIRROR_RENDER_MODE);
-        }
-    });
-#endif
 }
 
 void Blit::run(const RenderContextPointer& renderContext, const gpu::FramebufferPointer& srcFramebuffer) {
@@ -148,60 +140,103 @@ void Blit::run(const RenderContextPointer& renderContext, const gpu::Framebuffer
     gpu::doInBatch("Blit", renderArgs->_context, [&](gpu::Batch& batch) {
         batch.setFramebuffer(blitFbo);
 
-        if (renderArgs->_renderMode == RenderArgs::MIRROR_RENDER_MODE) {
-            if (renderArgs->isStereo()) {
-                gpu::Vec4i srcRectLeft;
-                srcRectLeft.z = width / 2;
-                srcRectLeft.w = height;
+        gpu::Vec4i rect;
+        rect.z = width;
+        rect.w = height;
 
-                gpu::Vec4i srcRectRight;
-                srcRectRight.x = width / 2;
-                srcRectRight.z = width;
-                srcRectRight.w = height;
-
-                gpu::Vec4i destRectLeft;
-                destRectLeft.x = srcRectLeft.z;
-                destRectLeft.z = srcRectLeft.x;
-                destRectLeft.y = srcRectLeft.y;
-                destRectLeft.w = srcRectLeft.w;
-
-                gpu::Vec4i destRectRight;
-                destRectRight.x = srcRectRight.z;
-                destRectRight.z = srcRectRight.x;
-                destRectRight.y = srcRectRight.y;
-                destRectRight.w = srcRectRight.w;
-
-                // Blit left to right and right to left in stereo
-                batch.blit(primaryFbo, srcRectRight, blitFbo, destRectLeft);
-                batch.blit(primaryFbo, srcRectLeft, blitFbo, destRectRight);
-            } else {
-                gpu::Vec4i srcRect;
-                srcRect.z = width;
-                srcRect.w = height;
-
-                gpu::Vec4i destRect;
-                destRect.x = width;
-                destRect.y = 0;
-                destRect.z = 0;
-                destRect.w = height;
-
-                batch.blit(primaryFbo, srcRect, blitFbo, destRect);
-            }
-        } else {
-            gpu::Vec4i rect;
-            rect.z = width;
-            rect.w = height;
-
-            batch.blit(primaryFbo, rect, blitFbo, rect);
-        }
+        batch.blit(primaryFbo, rect, blitFbo, rect);
     });
 }
 
-void ExtractFrustums::run(const render::RenderContextPointer& renderContext, Output& output) {
+NewFramebuffer::NewFramebuffer(gpu::Element pixelFormat) {
+    _pixelFormat = pixelFormat;
+}
+
+void NewFramebuffer::run(const render::RenderContextPointer& renderContext, Output& output) {
+    RenderArgs* args = renderContext->args;
+    glm::uvec2 frameSize(args->_viewport.z, args->_viewport.w);
+    output.reset();
+
+    if (_outputFramebuffer && _outputFramebuffer->getSize() != frameSize) {
+        _outputFramebuffer.reset();
+    }
+
+    if (!_outputFramebuffer) {
+        _outputFramebuffer = gpu::FramebufferPointer(gpu::Framebuffer::create("newFramebuffer.out"));
+        auto colorFormat = _pixelFormat;
+        auto defaultSampler = gpu::Sampler(gpu::Sampler::FILTER_MIN_MAG_LINEAR);
+        auto colorTexture = gpu::Texture::createRenderBuffer(colorFormat, frameSize.x, frameSize.y, gpu::Texture::SINGLE_MIP, defaultSampler);
+        _outputFramebuffer->setRenderBuffer(0, colorTexture);
+    }
+
+    output = _outputFramebuffer;
+}
+
+void NewOrDefaultFramebuffer::run(const render::RenderContextPointer& renderContext, const Input& input, Output& output) {
+    RenderArgs* args = renderContext->args;
+    // auto frameSize = input;
+    glm::uvec2 frameSize(args->_viewport.z, args->_viewport.w);
+    output.reset();
+
+    // First if the default Framebuffer is the correct size then use it
+    auto destBlitFbo = args->_blitFramebuffer;
+    if (destBlitFbo && destBlitFbo->getSize() == frameSize) {
+        output = destBlitFbo;
+        return;
+    }
+
+    // Else use the lodal Framebuffer
+    if (_outputFramebuffer && _outputFramebuffer->getSize() != frameSize) {
+        _outputFramebuffer.reset();
+    }
+
+    if (!_outputFramebuffer) {
+        _outputFramebuffer = gpu::FramebufferPointer(gpu::Framebuffer::create("newOrDefaultFramebuffer.out"));
+        auto colorFormat = gpu::Element::COLOR_SRGBA_32;
+        auto defaultSampler = gpu::Sampler(gpu::Sampler::FILTER_MIN_MAG_LINEAR);
+        auto colorTexture = gpu::Texture::createRenderBuffer(colorFormat, frameSize.x, frameSize.y, gpu::Texture::SINGLE_MIP, defaultSampler);
+        _outputFramebuffer->setRenderBuffer(0, colorTexture);
+    }
+
+    output = _outputFramebuffer;
+}
+
+void ResolveFramebuffer::run(const render::RenderContextPointer& renderContext, const Inputs& inputs, Outputs& outputs) {
+    RenderArgs* args = renderContext->args;
+    auto srcFbo = inputs.get0();
+    auto destFbo = inputs.get1();
+
+    if (!destFbo) {
+        destFbo = args->_blitFramebuffer;
+    }
+    outputs = destFbo;
+
+    // Check valid src and dest
+    if (!srcFbo || !destFbo) {
+        return;
+    }
+    
+    // Check valid size for sr and dest
+    auto frameSize(srcFbo->getSize());
+    if (destFbo->getSize() != frameSize) {
+        return;
+    }
+
+    gpu::Vec4i rectSrc;
+    rectSrc.z = frameSize.x;
+    rectSrc.w = frameSize.y;
+    gpu::doInBatch("Resolve", args->_context, [&](gpu::Batch& batch) { 
+        batch.blit(srcFbo, rectSrc, destFbo, rectSrc);
+    });
+}
+
+ void ExtractFrustums::run(const render::RenderContextPointer& renderContext, const Inputs& inputs, Outputs& output) {
     assert(renderContext->args);
     assert(renderContext->args->_context);
 
     RenderArgs* args = renderContext->args;
+
+    const auto& shadowFrame = inputs;
 
     // Return view frustum
     auto& viewFrustum = output[VIEW_FRUSTUM].edit<ViewFrustumPointer>();
@@ -212,20 +247,18 @@ void ExtractFrustums::run(const render::RenderContextPointer& renderContext, Out
     }
 
     // Return shadow frustum
-    auto lightStage = args->_scene->getStage<LightStage>(LightStage::getName());
+    LightStage::ShadowPointer globalShadow;
+    if (shadowFrame && !shadowFrame->_objects.empty() && shadowFrame->_objects[0]) {
+        globalShadow = shadowFrame->_objects[0];
+    }
     for (auto i = 0; i < SHADOW_CASCADE_FRUSTUM_COUNT; i++) {
         auto& shadowFrustum = output[SHADOW_CASCADE0_FRUSTUM+i].edit<ViewFrustumPointer>();
-        if (lightStage) {
-            auto globalShadow = lightStage->getCurrentKeyShadow();
-
-            if (globalShadow && i<(int)globalShadow->getCascadeCount()) {
-                auto& cascade = globalShadow->getCascade(i);
-                shadowFrustum = cascade.getFrustum();
-            } else {
-                shadowFrustum.reset();
-            }
+        if (globalShadow && i<(int)globalShadow->getCascadeCount()) {
+            auto& cascade = globalShadow->getCascade(i);
+            shadowFrustum = cascade.getFrustum();
         } else {
             shadowFrustum.reset();
         }
     }
 }
+

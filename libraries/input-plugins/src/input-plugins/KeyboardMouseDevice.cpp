@@ -13,6 +13,7 @@
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QTouchEvent>
+#include <QGesture>
 
 #include <controllers/UserInputMapper.h>
 #include <PathUtils.h>
@@ -21,14 +22,27 @@
 const char* KeyboardMouseDevice::NAME = "Keyboard/Mouse";
 bool KeyboardMouseDevice::_enableTouch = true;
 
+void KeyboardMouseDevice::updateDeltaAxisValue(int channel, float value) {
+    // Associate timestamps with non-zero delta values so that consecutive identical values can be output.
+    _inputDevice->_axisStateMap[channel] = { value, value != 0.0f ? usecTimestampNow() : 0 };
+}
+
 void KeyboardMouseDevice::pluginUpdate(float deltaTime, const controller::InputCalibrationData& inputCalibrationData) {
     auto userInputMapper = DependencyManager::get<controller::UserInputMapper>();
     userInputMapper->withLock([&, this]() {
         _inputDevice->update(deltaTime, inputCalibrationData);
         eraseMouseClicked();
 
-        _inputDevice->_axisStateMap[MOUSE_AXIS_X] = _lastCursor.x();
-        _inputDevice->_axisStateMap[MOUSE_AXIS_Y] = _lastCursor.y();
+        _inputDevice->_axisStateMap[MOUSE_AXIS_X].value = _lastCursor.x();
+        _inputDevice->_axisStateMap[MOUSE_AXIS_Y].value = _lastCursor.y();
+
+        QPoint currentMove = _lastCursor - _previousCursor;
+        updateDeltaAxisValue(MOUSE_AXIS_X_POS, currentMove.x() > 0 ? currentMove.x() : 0.0f);
+        updateDeltaAxisValue(MOUSE_AXIS_X_NEG, currentMove.x() < 0 ? -currentMove.x() : 0.0f);
+        // Y mouse is inverted positive is pointing up the screen
+        updateDeltaAxisValue(MOUSE_AXIS_Y_POS, currentMove.y() < 0 ? -currentMove.y() : 0.0f);
+        updateDeltaAxisValue(MOUSE_AXIS_Y_NEG, currentMove.y() > 0 ? currentMove.y() : 0.0f);
+        _previousCursor = _lastCursor;
     });
 
     // For touch event, we need to check that the last event is not too long ago
@@ -73,7 +87,6 @@ void KeyboardMouseDevice::mousePressEvent(QMouseEvent* event) {
     }
     _lastCursor = event->pos();
     _mousePressTime = usecTimestampNow();
-    _mouseMoved = false;
 
     _mousePressPos = event->pos();
     _clickDeadspotActive = true;
@@ -102,20 +115,11 @@ void KeyboardMouseDevice::eraseMouseClicked() {
 
 void KeyboardMouseDevice::mouseMoveEvent(QMouseEvent* event) {
     QPoint currentPos = event->pos();
-    QPoint currentMove = currentPos - _lastCursor;
-
-    _inputDevice->_axisStateMap[MOUSE_AXIS_X_POS] = (currentMove.x() > 0 ? currentMove.x() : 0.0f);
-    _inputDevice->_axisStateMap[MOUSE_AXIS_X_NEG] = (currentMove.x() < 0 ? -currentMove.x() : 0.0f);
-    // Y mouse is inverted positive is pointing up the screen
-    _inputDevice->_axisStateMap[MOUSE_AXIS_Y_POS] = (currentMove.y() < 0 ? -currentMove.y() : 0.0f);
-    _inputDevice->_axisStateMap[MOUSE_AXIS_Y_NEG] = (currentMove.y() > 0 ? currentMove.y() : 0.0f);
 
     // FIXME - this has the characteristic that it will show large jumps when you move the cursor
     // outside of the application window, because we don't get MouseEvents when the cursor is outside
     // of the application window.
     _lastCursor = currentPos;
-
-    _mouseMoved = true;
 
     const int CLICK_EVENT_DEADSPOT = 6; // pixels
     if (_clickDeadspotActive && (_mousePressPos - currentPos).manhattanLength() > CLICK_EVENT_DEADSPOT) {
@@ -123,13 +127,66 @@ void KeyboardMouseDevice::mouseMoveEvent(QMouseEvent* event) {
     }
 }
 
-void KeyboardMouseDevice::wheelEvent(QWheelEvent* event) {
-    auto currentMove = event->angleDelta() / 120.0f;
+bool KeyboardMouseDevice::isWheelByTouchPad(QWheelEvent* event) {
+    // This function is only used to track two finger swipe using the touchPad on Windows.
+    // That gesture gets sent as a wheel event. This wheel delta values are used to orbit the camera.
+    // On MacOS the two finger swipe fires touch events and wheel events. 
+    // In that case we always return false to avoid interference between both.
+#ifdef Q_OS_MAC
+    return false;
+#endif
+    QPoint delta = event->angleDelta();
+    int deltaValueX = abs(delta.x());
+    int deltaValueY = abs(delta.y());
+    const int COMMON_WHEEL_DELTA_VALUE = 120;
+    // If deltaValueX or deltaValueY are multiple of 120 they are triggered by a mouse wheel
+    bool isMouseWheel = (deltaValueX + deltaValueY) % COMMON_WHEEL_DELTA_VALUE == 0;
+    if (!isMouseWheel) {
+        // We track repetition in wheel values to detect non-standard mouse wheels
+        const int MAX_WHEEL_DELTA_REPEAT = 10;
+        if (deltaValueX != 0) {
+            if (abs(_lastWheelDelta.x()) == deltaValueX) {
+                _wheelDeltaRepeatCount.setX(_wheelDeltaRepeatCount.x() + 1);
+            } else {
+                _wheelDeltaRepeatCount.setX(0);
+            }
+            return _wheelDeltaRepeatCount.x() < MAX_WHEEL_DELTA_REPEAT;
+        }
+        if (deltaValueY != 0) {
+            if (abs(_lastWheelDelta.y()) == deltaValueY) {
+                _wheelDeltaRepeatCount.setY(_wheelDeltaRepeatCount.y() + 1);
+            } else {
+                _wheelDeltaRepeatCount.setY(0);
+            }
+            return _wheelDeltaRepeatCount.y() < MAX_WHEEL_DELTA_REPEAT;
+        }
+    }
+    return false;
+}
 
-    _inputDevice->_axisStateMap[_inputDevice->makeInput(MOUSE_AXIS_WHEEL_X_POS).getChannel()] = (currentMove.x() > 0 ? currentMove.x() : 0.0f);
-    _inputDevice->_axisStateMap[_inputDevice->makeInput(MOUSE_AXIS_WHEEL_X_NEG).getChannel()] = (currentMove.x() < 0 ? -currentMove.x() : 0.0f);
-    _inputDevice->_axisStateMap[_inputDevice->makeInput(MOUSE_AXIS_WHEEL_Y_POS).getChannel()] = (currentMove.y() > 0 ? currentMove.y() : 0.0f);
-    _inputDevice->_axisStateMap[_inputDevice->makeInput(MOUSE_AXIS_WHEEL_Y_NEG).getChannel()] = (currentMove.y() < 0 ? -currentMove.y() : 0.0f);
+void KeyboardMouseDevice::wheelEvent(QWheelEvent* event) {    
+    if (isWheelByTouchPad(event)) {
+        // Check for horizontal and vertical scroll not triggered by the mouse.
+        // These are most likelly triggered by two fingers gesture on touchpad for windows.
+        QPoint delta = event->angleDelta();
+        float deltaX = (float)delta.x();
+        float deltaY = (float)delta.y();
+        const float WHEEL_X_ATTENUATION = 0.3f;
+        _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_X_POS).getChannel()].value = (deltaX > 0 ? WHEEL_X_ATTENUATION * deltaX : 0.0f);
+        _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_X_NEG).getChannel()].value = (deltaX < 0 ? -WHEEL_X_ATTENUATION * deltaX : 0.0f);
+        // Y mouse is inverted positive is pointing up the screen
+        const float WHEEL_Y_ATTENUATION = 0.02f;
+        _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_Y_POS).getChannel()].value = (deltaY < 0 ? -WHEEL_Y_ATTENUATION * deltaY : 0.0f);
+        _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_Y_NEG).getChannel()].value = (deltaY > 0 ? WHEEL_Y_ATTENUATION * deltaY : 0.0f);
+    } else {
+        auto currentMove = event->angleDelta() / 120.0f;
+        float currentMoveX = (float)currentMove.x();
+        float currentMoveY = (float)currentMove.y();
+        _inputDevice->_axisStateMap[_inputDevice->makeInput(MOUSE_AXIS_WHEEL_X_POS).getChannel()].value = currentMoveX > 0 ? currentMoveX : 0.0f;
+        _inputDevice->_axisStateMap[_inputDevice->makeInput(MOUSE_AXIS_WHEEL_X_NEG).getChannel()].value = currentMoveX < 0 ? -currentMoveX : 0.0f;
+        _inputDevice->_axisStateMap[_inputDevice->makeInput(MOUSE_AXIS_WHEEL_Y_POS).getChannel()].value = currentMoveY > 0 ? currentMoveY : 0.0f;
+        _inputDevice->_axisStateMap[_inputDevice->makeInput(MOUSE_AXIS_WHEEL_Y_NEG).getChannel()].value = currentMoveY < 0 ? -currentMoveY : 0.0f;
+    }
 }
 
 glm::vec2 evalAverageTouchPoints(const QList<QTouchEvent::TouchPoint>& points) {
@@ -141,6 +198,37 @@ glm::vec2 evalAverageTouchPoints(const QList<QTouchEvent::TouchPoint>& points) {
         averagePoint /= (float)(points.count());
     }
     return averagePoint;
+}
+
+void KeyboardMouseDevice::touchGestureEvent(const QGestureEvent* event) {
+    QPinchGesture* pinchGesture = (QPinchGesture*) event->gesture(Qt::PinchGesture);
+
+    if (pinchGesture) {
+        switch (pinchGesture->state()) {
+            case Qt::GestureStarted:
+                _lastTotalScaleFactor = pinchGesture->totalScaleFactor();
+                break;
+
+            case Qt::GestureUpdated: {
+                const float PINCH_DELTA_STEP = 0.04f;
+                qreal totalScaleFactor = pinchGesture->totalScaleFactor();
+                qreal scaleFactorDelta = _lastTotalScaleFactor - totalScaleFactor;
+                _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_GESTURE_PINCH_POS).getChannel()].value = scaleFactorDelta > 0.0 ? PINCH_DELTA_STEP : 0.0f;
+                _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_GESTURE_PINCH_NEG).getChannel()].value = scaleFactorDelta < 0.0 ? PINCH_DELTA_STEP : 0.0f;
+                _lastTotalScaleFactor = totalScaleFactor;
+                break;
+            }
+
+            case Qt::GestureFinished: {
+                _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_GESTURE_PINCH_POS).getChannel()].value = 0.0f;
+                _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_GESTURE_PINCH_NEG).getChannel()].value = 0.0f;
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
 }
 
 void KeyboardMouseDevice::touchBeginEvent(const QTouchEvent* event) {
@@ -165,15 +253,14 @@ void KeyboardMouseDevice::touchUpdateEvent(const QTouchEvent* event) {
         _lastTouchTime = _clock.now();
 
         if (!_isTouching) {
-            _isTouching = event->touchPointStates().testFlag(Qt::TouchPointPressed);
+            _isTouching = true;
         } else {
             auto currentMove = currentPos - _lastTouch;
-
-            _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_X_POS).getChannel()] = (currentMove.x > 0 ? currentMove.x : 0.0f);
-            _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_X_NEG).getChannel()] = (currentMove.x < 0 ? -currentMove.x : 0.0f);
+            _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_X_POS).getChannel()].value = (currentMove.x > 0 ? currentMove.x : 0.0f);
+            _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_X_NEG).getChannel()].value = (currentMove.x < 0 ? -currentMove.x : 0.0f);
             // Y mouse is inverted positive is pointing up the screen
-            _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_Y_POS).getChannel()] = (currentMove.y < 0 ? -currentMove.y : 0.0f);
-            _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_Y_NEG).getChannel()] = (currentMove.y > 0 ? currentMove.y : 0.0f);
+            _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_Y_POS).getChannel()].value = (currentMove.y < 0 ? -currentMove.y : 0.0f);
+            _inputDevice->_axisStateMap[_inputDevice->makeInput(TOUCH_AXIS_Y_NEG).getChannel()].value = (currentMove.y > 0 ? currentMove.y : 0.0f);
         }
 
         _lastTouch = currentPos;
@@ -218,12 +305,13 @@ controller::Input KeyboardMouseDevice::InputDevice::makeInput(KeyboardMouseDevic
 
 /**jsdoc
  * <p>The <code>Controller.Hardware.Keyboard</code> object has properties representing keyboard, mouse, and display touch 
- * events. The property values are integer IDs, uniquely identifying each output. <em>Read-only.</em> These can be mapped to 
- * actions or functions or <code>Controller.Standard</code> items in a {@link RouteObject} mapping. For presses, each data 
- * value is either <code>1.0</code> for "true" or <code>0.0</code> for "false".</p>
+ * events. The property values are integer IDs, uniquely identifying each output. <em>Read-only.</em></p>
+ * <p>These events can be mapped to actions or functions or <code>Controller.Standard</code> items in a {@link RouteObject}
+ * mapping. For presses, each data value is either <code>1.0</code> for "true" or <code>0.0</code> for "false".</p>
+ * 
  * <table>
  *   <thead>
- *     <tr><th>Property</th><th>Type</th><td>Data</th><th>Description</th></tr>
+ *     <tr><th>Property</th><th>Type</th><th>Data</th><th>Description</th></tr>
  *   </thead>
  *   <tbody>
  *     <tr><td><code>0</code> &ndash; <code>9</code></td><td>number</td><td>number</td><td>A "0" &ndash; "1" key on the 
@@ -247,28 +335,41 @@ controller::Input KeyboardMouseDevice::InputDevice::makeInput(KeyboardMouseDevic
  *       </td></tr>
  *     <tr><td><code>PgDown</code></td><td>number</td><td>number</td><td>The page down key on the keyboard or keypad is pressed.
  *       </td></tr>
- *     <tr><td><code>LeftMouseButton</code></td><td>number</td><td>number</td><td>The left mouse button pressed.</td></tr>
- *     <tr><td><code>MiddleMouseButton</code></td><td>number</td><td>number</td><td>The middle mouse button pressed.</td></tr>
- *     <tr><td><code>RightMouseButton</code></td><td>number</td><td>number</td><td>The right mouse button pressed.</td></tr>
- *     <tr><td><code>LeftMouseClicked</code></td><td>number</td><td>number</td><td>The left mouse button clicked.</td></tr>
- *     <tr><td><code>MiddleMouseClicked</code></td><td>number</td><td>number</td><td>The middle mouse button clicked.</td></tr>
- *     <tr><td><code>RightMouseClicked</code></td><td>number</td><td>number</td><td>The right mouse button clicked.</td></tr>
- *     <tr><td><code>MouseMoveRight</code></td><td>number</td><td>number</td><td>The mouse moved right.</td></tr>
- *     <tr><td><code>MouseMoveLeft</code></td><td>number</td><td>number</td><td>The mouse moved left.</td></tr>
- *     <tr><td><code>MouseMoveUp</code></td><td>number</td><td>number</td><td>The mouse moved up.</td></tr>
- *     <tr><td><code>MouseMoveDown</code></td><td>number</td><td>number</td><td>The mouse moved down.</td></tr>
+ *     <tr><td><code>LeftMouseButton</code></td><td>number</td><td>number</td><td>The left mouse button is pressed.</td></tr>
+ *     <tr><td><code>MiddleMouseButton</code></td><td>number</td><td>number</td><td>The middle mouse button is pressed.
+ *       </td></tr>
+ *     <tr><td><code>RightMouseButton</code></td><td>number</td><td>number</td><td>The right mouse button is pressed.</td></tr>
+ *     <tr><td><code>LeftMouseClicked</code></td><td>number</td><td>number</td><td>The left mouse button was clicked.</td></tr>
+ *     <tr><td><code>MiddleMouseClicked</code></td><td>number</td><td>number</td><td>The middle mouse button was clicked.
+ *       </td></tr>
+ *     <tr><td><code>RightMouseClicked</code></td><td>number</td><td>number</td><td>The right mouse button was clicked.
+ *       </td></tr>
+ *     <tr><td><code>MouseMoveRight</code></td><td>number</td><td>number</td><td>The mouse moved right. The data value is how 
+ *       far it moved.</td></tr>
+ *     <tr><td><code>MouseMoveLeft</code></td><td>number</td><td>number</td><td>The mouse moved left. The data value is how far 
+ *       it moved.</td></tr>
+ *     <tr><td><code>MouseMoveUp</code></td><td>number</td><td>number</td><td>The mouse moved up. The data value is how far it 
+ *       moved.</td></tr>
+ *     <tr><td><code>MouseMoveDown</code></td><td>number</td><td>number</td><td>The mouse moved down. The data value is how far 
+ *       it moved.</td></tr>
  *     <tr><td><code>MouseX</code></td><td>number</td><td>number</td><td>The mouse x-coordinate changed. The data value is its 
  *       new x-coordinate value.</td></tr>
  *     <tr><td><code>MouseY</code></td><td>number</td><td>number</td><td>The mouse y-coordinate changed. The data value is its 
  *       new y-coordinate value.</td></tr>
- *     <tr><td><code>MouseWheelRight</code></td><td>number</td><td>number</td><td>The mouse wheel rotated left. The data value 
+ *     <tr><td><code>MouseWheelRight</code></td><td>number</td><td>number</td><td>The mouse wheel rotated right. The data value 
  *       is the number of units rotated (typically <code>1.0</code>).</td></tr>
  *     <tr><td><code>MouseWheelLeft</code></td><td>number</td><td>number</td><td>The mouse wheel rotated left. The data value 
  *       is the number of units rotated (typically <code>1.0</code>).</td></tr>
  *     <tr><td><code>MouseWheelUp</code></td><td>number</td><td>number</td><td>The mouse wheel rotated up. The data value 
- *       is the number of units rotated (typically <code>1.0</code>).</td></tr>
+ *       is the number of units rotated (typically <code>1.0</code>).
+ *       <p><strong>Warning:</strong> The mouse wheel in an ordinary mouse generates left/right wheel events instead of 
+ *       up/down.</p>
+ *       </td></tr>
  *     <tr><td><code>MouseWheelDown</code></td><td>number</td><td>number</td><td>The mouse wheel rotated down. The data value 
- *       is the number of units rotated (typically <code>1.0</code>).</td></tr>
+ *       is the number of units rotated (typically <code>1.0</code>).
+ *       <p><strong>Warning:</strong> The mouse wheel in an ordinary mouse generates left/right wheel events instead of 
+ *       up/down.</p>
+ *       </td></tr>
   *     <tr><td><code>TouchpadRight</code></td><td>number</td><td>number</td><td>The average touch on a touch-enabled device 
  *       moved right. The data value is how far the average position of all touch points moved.</td></tr>
  *     <tr><td><code>TouchpadLeft</code></td><td>number</td><td>number</td><td>The average touch on a touch-enabled device 
@@ -280,7 +381,6 @@ controller::Input KeyboardMouseDevice::InputDevice::makeInput(KeyboardMouseDevic
   *   </tbody>
  * </table>
  * @typedef {object} Controller.Hardware-Keyboard
- * @todo <em>Currently, the mouse wheel in an ordinary mouse generates left/right wheel events instead of up/down.</em>
  */
 controller::Input::NamedVector KeyboardMouseDevice::InputDevice::getAvailableInputs() const {
     using namespace controller;
@@ -330,6 +430,8 @@ controller::Input::NamedVector KeyboardMouseDevice::InputDevice::getAvailableInp
         availableInputs.append(Input::NamedPair(makeInput(TOUCH_AXIS_X_NEG), "TouchpadLeft"));
         availableInputs.append(Input::NamedPair(makeInput(TOUCH_AXIS_Y_POS), "TouchpadUp"));
         availableInputs.append(Input::NamedPair(makeInput(TOUCH_AXIS_Y_NEG), "TouchpadDown"));
+        availableInputs.append(Input::NamedPair(makeInput(TOUCH_GESTURE_PINCH_POS), "GesturePinchOut"));
+        availableInputs.append(Input::NamedPair(makeInput(TOUCH_GESTURE_PINCH_NEG), "GesturePinchIn"));
     });
     return availableInputs;
 }

@@ -37,14 +37,17 @@ public:
     void initJointStates() override;
 
     void simulate(float deltaTime, bool fullUpdate = true) override;
+    glm::vec3 avoidCrossedEyes(const glm::vec3& lookAt);
     void updateRig(float deltaTime, glm::mat4 parentTransform) override;
     void updateAttitude(const glm::quat& orientation);
 
+    bool getIsJointOverridden(int jointIndex) const;
+
     /// Returns the index of the left hand joint, or -1 if not found.
-    int getLeftHandJointIndex() const { return isActive() ? getFBXGeometry().leftHandJointIndex : -1; }
+    int getLeftHandJointIndex() const { return isActive() ? _rig.indexOfJoint("LeftHand") : -1; }
 
     /// Returns the index of the right hand joint, or -1 if not found.
-    int getRightHandJointIndex() const { return isActive() ? getFBXGeometry().rightHandJointIndex : -1; }
+    int getRightHandJointIndex() const { return isActive() ? _rig.indexOfJoint("RightHand") : -1; }
 
     bool getLeftGrabPosition(glm::vec3& position) const;
     bool getRightGrabPosition(glm::vec3& position) const;
@@ -57,16 +60,8 @@ public:
     /// \return true whether or not the position was found
     bool getRightHandPosition(glm::vec3& position) const;
 
-    /// Gets the position of the left shoulder.
-    /// \return whether or not the left shoulder joint was found
-    bool getLeftShoulderPosition(glm::vec3& position) const;
-
     /// Returns the extended length from the left hand to its last free ancestor.
     float getLeftArmLength() const;
-
-    /// Gets the position of the right shoulder.
-    /// \return whether or not the right shoulder joint was found
-    bool getRightShoulderPosition(glm::vec3& position) const;
 
     /// Returns the position of the head joint.
     /// \return whether or not the head was found

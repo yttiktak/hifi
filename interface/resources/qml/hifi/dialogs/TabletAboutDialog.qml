@@ -9,7 +9,7 @@
 //
 
 import QtQuick 2.5
-import "../../styles-uit"
+import stylesUit 1.0
 
 Rectangle {
     width: 480
@@ -97,15 +97,16 @@ Rectangle {
             textFormat: Text.StyledText
             linkColor: "#00B4EF"
             color: "white"
-            text: "Blockchain technology from <a href=\"https://elementsproject.org/elements/\">Elements</a>."
+            property string link: "https://eos.io/"
+            text: "Blockchain technology from <a href=\"" + link + "\">EOS</a>."
             size: 14
             onLinkActivated: {
-                HiFiAbout.openUrl("https://elementsproject.org/elements/");
+                HiFiAbout.openUrl(link);
             }
         }
         RalewayRegular {
             color: "white"
-            text: "© 2018 High Fidelity. All rights reserved."
+            text: "© 2012 - 2019 High Fidelity, Inc.. All rights reserved."
             size: 14
         }
         RalewayRegular {

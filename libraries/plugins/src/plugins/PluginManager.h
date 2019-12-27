@@ -10,11 +10,11 @@
 #include <QObject>
 
 #include <DependencyManager.h>
+#include <SettingHandle.h>
 
 #include "Forward.h"
 
-
-class PluginManager;
+class QPluginLoader;
 using PluginManagerPointer = QSharedPointer<PluginManager>;
 
 class PluginManager : public QObject, public Dependency {
@@ -28,6 +28,7 @@ public:
     const InputPluginList& getInputPlugins();
     const CodecPluginList& getCodecPlugins();
     const SteamClientPluginPointer getSteamClientPlugin();
+    const OculusPlatformPluginPointer getOculusPlatformPlugin();
 
     DisplayPluginList getPreferredDisplayPlugins();
     void setPreferredDisplayPlugins(const QStringList& displays);
@@ -38,6 +39,7 @@ public:
     void saveSettings();
     void setContainer(PluginContainer* container) { _container = container; }
 
+    int instantiate();
     void shutdown();
 
     // Application that have statically linked plugins can expose them to the plugin manager with these function
@@ -46,6 +48,10 @@ public:
     void setCodecPluginProvider(const CodecPluginProvider& provider);
     void setInputPluginSettingsPersister(const InputPluginSettingsPersister& persister);
     QStringList getRunningInputDeviceNames() const;
+
+    using PluginFilter = std::function<bool(const QJsonObject&)>;
+    void setPluginFilter(PluginFilter pluginFilter) { _pluginFilter = pluginFilter; }
+    Q_INVOKABLE DisplayPluginList getAllDisplayPlugins();
 
 signals:
     void inputDeviceRunningChanged(const QString& pluginName, bool isRunning, const QStringList& runningDevices);
@@ -60,4 +66,22 @@ private:
     PluginContainer* _container { nullptr };
     DisplayPluginList _displayPlugins;
     InputPluginList _inputPlugins;
+    PluginFilter _pluginFilter { [](const QJsonObject&) { return true; } };
+
+    using Loader = QSharedPointer<QPluginLoader>;
+    using LoaderList = QList<Loader>;
+
+    const LoaderList& getLoadedPlugins() const;
+    Setting::Handle<bool> _enableScriptingPlugins {
+        "private/enableScriptingPlugins", (bool)qgetenv("enableScriptingPlugins").toInt()
+    };
 };
+
+// TODO: we should define this value in CMake, and then use CMake
+// templating to generate the individual plugin.json files, so that we
+// don't have to update every plugin.json file whenever we update this
+// value.  The value should match "version" in
+//   plugins/*/src/plugin.json
+//   plugins/oculus/src/oculus.json
+//   etc
+static const int HIFI_PLUGIN_INTERFACE_VERSION = 1;

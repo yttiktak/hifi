@@ -31,8 +31,14 @@ public:
     void removePick(unsigned int uid);
     void enablePick(unsigned int uid) const;
     void disablePick(unsigned int uid) const;
+    bool isPickEnabled(unsigned int uid) const;
+    QVector<unsigned int> getPicks() const;
 
     PickResultPointer getPrevPickResult(unsigned int uid) const;
+    // The actual current properties of the pick
+    QVariantMap getPickProperties(unsigned int uid) const;
+    // The properties that were passed in to create the pick (may be empty if the pick was created by invoking the constructor)
+    QVariantMap getPickScriptParameters(unsigned int uid) const;
 
     template <typename T>
     std::shared_ptr<T> getPrevPickResultTyped(unsigned int uid) const {
@@ -61,14 +67,14 @@ public:
 
     bool getForceCoarsePicking() { return _forceCoarsePicking; }
 
-    const std::vector<QVector4D>& getUpdatedPickCounts() { return _updatedPickCounts; }
+    const std::vector<QVector3D>& getUpdatedPickCounts() { return _updatedPickCounts; }
     const std::vector<int>& getTotalPickCounts() { return _totalPickCounts; }
 
 public slots:
     void setForceCoarsePicking(bool forceCoarsePicking) { _forceCoarsePicking = forceCoarsePicking; }
 
 protected:
-    std::vector<QVector4D> _updatedPickCounts { PickQuery::NUM_PICK_TYPES };
+    std::vector<QVector3D> _updatedPickCounts { PickQuery::NUM_PICK_TYPES };
     std::vector<int> _totalPickCounts { 0, 0, 0, 0 };
 
     bool _forceCoarsePicking { false };

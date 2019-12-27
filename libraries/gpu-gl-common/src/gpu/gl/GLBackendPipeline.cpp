@@ -54,7 +54,7 @@ void GLBackend::do_setPipeline(const Batch& batch, size_t paramOffset) {
             // check the program cache
             // pick the program version
 #ifdef GPU_STEREO_CAMERA_BUFFER
-        GLuint glprogram = pipelineObject->_program->getProgram((GLShader::Version)isStereo());
+        GLuint glprogram = pipelineObject->_program->getProgram(getShaderVariant());
 #else
         GLuint glprogram = pipelineObject->_program->getProgram();
 #endif
@@ -309,7 +309,7 @@ void GLBackend::setResourceTexture(unsigned int slot, const TexturePointer& reso
         glActiveTexture(GL_TEXTURE0 + slot);
         glBindTexture(textureState._target, to);
         (void)CHECK_GL_ERROR();
-        _stats._RSAmountTextureMemoryBounded += (int)object->size();
+        _stats._RSAmountTextureMemoryBounded += (uint64_t)object->size();
 
     } else {
         releaseResourceTexture(slot);

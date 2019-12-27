@@ -52,7 +52,7 @@
         var qml = Script.resolvePath(QMLAPP_URL);
         window = Desktop.createWindow(Script.resolvePath(QMLAPP_URL), {
             title: 'Workload Inspector',
-            flags: Desktop.ALWAYS_ON_TOP,
+            additionalFlags: Desktop.ALWAYS_ON_TOP,
             presentationMode: Desktop.PresentationMode.NATIVE,
             size: {x: 400, y: 600}
         });
@@ -125,7 +125,6 @@
     Script.include("./test_physics_scene.js")
 
     function fromQml(message) {
-        print("fromQml: " + JSON.stringify(message))
         switch (message.method) {
         case "createScene":
             createScene();

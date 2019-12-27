@@ -64,7 +64,7 @@ EntityScriptServer::EntityScriptServer(ReceivedMessage& message) : ThreadedAssig
     DependencyManager::set<ResourceScriptingInterface>();
 
     DependencyManager::set<ResourceManager>();
-    DependencyManager::set<PluginManager>();
+    DependencyManager::set<PluginManager>()->instantiate();
 
     DependencyManager::registerInheritance<SpatialParentFinder, AssignmentParentFinder>();
 
@@ -85,8 +85,6 @@ EntityScriptServer::EntityScriptServer(ReceivedMessage& message) : ThreadedAssig
     packetReceiver.registerListenerForTypes({ PacketType::OctreeStats, PacketType::EntityData, PacketType::EntityErase },
                                             this, "handleOctreePacket");
     packetReceiver.registerListener(PacketType::SelectedAudioFormat, this, "handleSelectedAudioFormat");
-
-    auto avatarHashMap = DependencyManager::set<AvatarHashMap>();
 
     packetReceiver.registerListener(PacketType::ReloadEntityServerScript, this, "handleReloadEntityServerScriptPacket");
     packetReceiver.registerListener(PacketType::EntityScriptGetStatus, this, "handleEntityScriptGetStatusPacket");
@@ -112,7 +110,6 @@ void EntityScriptServer::handleReloadEntityServerScriptPacket(QSharedPointer<Rec
 
         if (_entityViewer.getTree() && !_shuttingDown) {
             qCDebug(entity_script_server) << "Reloading: " << entityID;
-            _entitiesScriptEngine->unloadEntityScript(entityID);
             checkAndCallPreload(entityID, true);
         }
     }
@@ -184,7 +181,6 @@ void EntityScriptServer::updateEntityPPS() {
         pps = std::min(_maxEntityPPS, pps);
     }
     _entityEditSender.setPacketsPerSecond(pps);
-    qDebug() << QString("Updating entity PPS to: %1 @ %2 PPS per script = %3 PPS").arg(numRunningScripts).arg(_entityPPSPerScript).arg(pps);
 }
 
 void EntityScriptServer::handleEntityServerScriptLogPacket(QSharedPointer<ReceivedMessage> message, SharedNodePointer senderNode) {
@@ -257,6 +253,7 @@ void EntityScriptServer::handleEntityScriptCallMethodPacket(QSharedPointer<Recei
 void EntityScriptServer::run() {
     DependencyManager::set<ScriptEngines>(ScriptEngine::ENTITY_SERVER_SCRIPT);
     DependencyManager::set<EntityScriptServerServices>();
+    DependencyManager::set<AvatarHashMap>();
 
     // make sure we request our script once the agent connects to the domain
     auto nodeList = DependencyManager::get<NodeList>();
@@ -303,10 +300,17 @@ void EntityScriptServer::run() {
 
     entityScriptingInterface->setEntityTree(_entityViewer.getTree());
 
-    DependencyManager::set<AssignmentParentFinder>(_entityViewer.getTree());
+    auto treePtr = _entityViewer.getTree();
+    DependencyManager::set<AssignmentParentFinder>(treePtr);
 
+    if (!_entitySimulation) {
+        SimpleEntitySimulationPointer simpleSimulation { new SimpleEntitySimulation() };
+        simpleSimulation->setEntityTree(treePtr);
+        treePtr->setSimulation(simpleSimulation);
+        _entitySimulation = simpleSimulation;
+    }
 
-    auto tree = _entityViewer.getTree().get();
+    auto tree = treePtr.get();
     connect(tree, &EntityTree::deletingEntity, this, &EntityScriptServer::deletingEntity, Qt::QueuedConnection);
     connect(tree, &EntityTree::addingEntity, this, &EntityScriptServer::addingEntity, Qt::QueuedConnection);
     connect(tree, &EntityTree::entityServerScriptChanging, this, &EntityScriptServer::entityServerScriptChanging, Qt::QueuedConnection);
@@ -443,6 +447,7 @@ void EntityScriptServer::resetEntitiesScriptEngine() {
     newEngine->globalObject().setProperty("WebSocketServer", webSocketServerConstructorValue);
 
     newEngine->registerGlobalObject("SoundCache", DependencyManager::get<SoundCacheScriptingInterface>().data());
+    newEngine->registerGlobalObject("AvatarList", DependencyManager::get<AvatarHashMap>().data());
 
     // connect this script engines printedMessage signal to the global ScriptEngines these various messages
     auto scriptEngines = DependencyManager::get<ScriptEngines>().data();
@@ -453,10 +458,11 @@ void EntityScriptServer::resetEntitiesScriptEngine() {
 
     connect(newEngine.data(), &ScriptEngine::update, this, [this] {
         _entityViewer.queryOctree();
+        _entityViewer.getTree()->preUpdate();
         _entityViewer.getTree()->update();
     });
 
-
+    scriptEngines->runScriptInitializers(newEngine);
     newEngine->runInThread();
     auto newEngineSP = qSharedPointerCast<EntitiesScriptEngineProvider>(newEngine);
     DependencyManager::get<EntityScriptingInterface>()->setEntitiesScriptEngine(newEngineSP);
@@ -525,30 +531,76 @@ void EntityScriptServer::deletingEntity(const EntityItemID& entityID) {
 
 void EntityScriptServer::entityServerScriptChanging(const EntityItemID& entityID, bool reload) {
     if (_entityViewer.getTree() && !_shuttingDown) {
-        _entitiesScriptEngine->unloadEntityScript(entityID, true);
         checkAndCallPreload(entityID, reload);
     }
 }
 
-void EntityScriptServer::checkAndCallPreload(const EntityItemID& entityID, bool reload) {
+void EntityScriptServer::checkAndCallPreload(const EntityItemID& entityID, bool forceRedownload) {
     if (_entityViewer.getTree() && !_shuttingDown && _entitiesScriptEngine) {
 
         EntityItemPointer entity = _entityViewer.getTree()->findEntityByEntityItemID(entityID);
         EntityScriptDetails details;
-        bool notRunning = !_entitiesScriptEngine->getEntityScriptDetails(entityID, details);
-        if (entity && (reload || notRunning || details.scriptText != entity->getServerScripts())) {
+        bool isRunning = _entitiesScriptEngine->getEntityScriptDetails(entityID, details);
+        if (entity && (forceRedownload || !isRunning || details.scriptText != entity->getServerScripts())) {
+            if (isRunning) {
+                _entitiesScriptEngine->unloadEntityScript(entityID, true);
+            }
+
             QString scriptUrl = entity->getServerScripts();
             if (!scriptUrl.isEmpty()) {
                 scriptUrl = DependencyManager::get<ResourceManager>()->normalizeURL(scriptUrl);
-                qCDebug(entity_script_server) << "Loading entity server script" << scriptUrl << "for" << entityID;
-                _entitiesScriptEngine->loadEntityScript(entityID, scriptUrl, reload);
+                _entitiesScriptEngine->loadEntityScript(entityID, scriptUrl, forceRedownload);
             }
         }
     }
 }
 
 void EntityScriptServer::sendStatsPacket() {
+    QJsonObject statsObject;
 
+    QJsonObject octreeStats;
+    octreeStats["elementCount"] = (double)OctreeElement::getNodeCount();
+    octreeStats["internalElementCount"] = (double)OctreeElement::getInternalNodeCount();
+    octreeStats["leafElementCount"] = (double)OctreeElement::getLeafNodeCount();
+    statsObject["octree_stats"] = octreeStats;
+
+    QJsonObject scriptEngineStats;
+    int numberRunningScripts = 0;
+    const auto scriptEngine = _entitiesScriptEngine;
+    if (scriptEngine) {
+        numberRunningScripts = scriptEngine->getNumRunningEntityScripts();
+    }
+    scriptEngineStats["number_running_scripts"] = numberRunningScripts;
+    statsObject["script_engine_stats"] = scriptEngineStats;
+    
+
+    auto nodeList = DependencyManager::get<NodeList>();
+    QJsonObject nodesObject;
+    nodeList->eachNode([&](const SharedNodePointer& node) {
+        QJsonObject clientStats;
+        const QString uuidString(uuidStringWithoutCurlyBraces(node->getUUID()));
+        clientStats["node_type"] = NodeType::getNodeTypeName(node->getType());
+        auto& nodeStats = node->getConnectionStats();
+
+        static const QString NODE_OUTBOUND_KBPS_STAT_KEY("outbound_kbit/s");
+        static const QString NODE_INBOUND_KBPS_STAT_KEY("inbound_kbit/s");
+
+        // add the key to ask the domain-server for a username replacement, if it has it
+        clientStats[USERNAME_UUID_REPLACEMENT_STATS_KEY] = uuidString;
+
+        clientStats[NODE_OUTBOUND_KBPS_STAT_KEY] = node->getOutboundKbps();
+        clientStats[NODE_INBOUND_KBPS_STAT_KEY] = node->getInboundKbps();
+
+        using namespace std::chrono;
+        const float statsPeriod = duration<float, seconds::period>(nodeStats.endTime - nodeStats.startTime).count();
+        clientStats["unreliable_packet/s"] = (nodeStats.sentUnreliablePackets + nodeStats.receivedUnreliablePackets) / statsPeriod;
+        clientStats["reliable_packet/s"] = (nodeStats.sentPackets + nodeStats.receivedPackets) / statsPeriod;
+
+        nodesObject[uuidString] = clientStats;
+    });
+
+    statsObject["nodes"] = nodesObject;
+    addPacketStatsAndSendStatsPacket(statsObject);
 }
 
 void EntityScriptServer::handleOctreePacket(QSharedPointer<ReceivedMessage> message, SharedNodePointer senderNode) {
@@ -583,15 +635,29 @@ void EntityScriptServer::handleOctreePacket(QSharedPointer<ReceivedMessage> mess
 void EntityScriptServer::aboutToFinish() {
     shutdownScriptEngine();
 
+    DependencyManager::get<EntityScriptingInterface>()->setEntityTree(nullptr);
+    DependencyManager::get<ResourceManager>()->cleanup();
+
+    DependencyManager::destroy<AudioScriptingInterface>();
+    DependencyManager::destroy<SoundCacheScriptingInterface>();
+    DependencyManager::destroy<ResourceScriptingInterface>();
+    DependencyManager::destroy<EntityScriptingInterface>();
+
+    DependencyManager::destroy<SoundCache>();
+    DependencyManager::destroy<ScriptCache>();
+
+    DependencyManager::destroy<ResourceManager>();
+    DependencyManager::destroy<ResourceCacheSharedItems>();
+
+    DependencyManager::destroy<MessagesClient>();
+
     DependencyManager::destroy<AssignmentDynamicFactory>();
     DependencyManager::destroy<AssignmentParentFinder>();
+    DependencyManager::destroy<AvatarHashMap>();
 
-    DependencyManager::get<ResourceManager>()->cleanup();
 
     DependencyManager::destroy<PluginManager>();
 
-    DependencyManager::destroy<ResourceScriptingInterface>();
-    DependencyManager::destroy<EntityScriptingInterface>();
 
     // cleanup the AudioInjectorManager (and any still running injectors)
     DependencyManager::destroy<AudioInjectorManager>();

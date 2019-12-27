@@ -358,6 +358,12 @@ glm::vec3 Triangle::getNormal() const {
     return glm::normalize(glm::cross(edge1, edge2));
 }
 
+float Triangle::getArea() const {
+    glm::vec3 edge1 = v1 - v0;
+    glm::vec3 edge2 = v2 - v0;
+    return 0.5f * glm::length(glm::cross(edge1, edge2));
+}
+
 Triangle Triangle::operator*(const glm::mat4& transform) const {
     return {
         glm::vec3(transform * glm::vec4(v0, 1.0f)),
@@ -539,6 +545,28 @@ bool doLineSegmentsIntersect(glm::vec2 r1p1, glm::vec2 r1p2, glm::vec2 r2p1, glm
          (d2 == 0 && isOnSegment(r2p1.x, r2p1.y, r2p2.x, r2p2.y, r1p2.x, r1p2.y)) ||
          (d3 == 0 && isOnSegment(r1p1.x, r1p1.y, r1p2.x, r1p2.y, r2p1.x, r2p1.y)) ||
          (d4 == 0 && isOnSegment(r1p1.x, r1p1.y, r1p2.x, r1p2.y, r2p2.x, r2p2.y));
+}
+
+bool findClosestApproachOfLines(glm::vec3 p1, glm::vec3 d1, glm::vec3 p2, glm::vec3 d2,
+                                // return values...
+                                float& t1, float& t2) {
+    // https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines/1993990#1993990
+    // https://en.wikipedia.org/wiki/Skew_lines#Nearest_Points
+    glm::vec3 n1 = glm::cross(d1, glm::cross(d2, d1));
+    glm::vec3 n2 = glm::cross(d2, glm::cross(d1, d2));
+
+    float denom1 = glm::dot(d1, n2);
+    float denom2 = glm::dot(d2, n1);
+
+    if (denom1 != 0.0f && denom2 != 0.0f) {
+        t1 = glm::dot((p2 - p1), n2) / denom1;
+        t2 = glm::dot((p1 - p2), n1) / denom2;
+        return true;
+    } else {
+        t1 = 0.0f;
+        t2 = 0.0f;
+        return false;
+    }
 }
 
 bool isOnSegment(float xi, float yi, float xj, float yj, float xk, float yk)  {

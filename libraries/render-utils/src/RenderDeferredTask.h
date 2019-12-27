@@ -14,11 +14,12 @@
 
 #include <gpu/Pipeline.h>
 #include <render/RenderFetchCullSortTask.h>
+#include "AssembleLightingStageTask.h"
 #include "LightingModel.h"
 #include "LightClusters.h"
 #include "RenderShadowTask.h"
 
-class DrawDeferredConfig : public render::Job::Config {
+class RenderTransparentDeferredConfig : public render::Job::Config {
     Q_OBJECT
     Q_PROPERTY(int numDrawn READ getNumDrawn NOTIFY newStats)
     Q_PROPERTY(int maxDrawn MEMBER maxDrawn NOTIFY dirty)
@@ -40,13 +41,13 @@ protected:
     int _numDrawn{ 0 };
 };
 
-class DrawDeferred {
+class RenderTransparentDeferred {
 public:
-    using Inputs = render::VaryingSet4<render::ItemBounds, LightingModelPointer, LightClustersPointer, glm::vec2>;
-    using Config = DrawDeferredConfig;
-    using JobModel = render::Job::ModelI<DrawDeferred, Inputs, Config>;
+    using Inputs = render::VaryingSet7<render::ItemBounds, HazeStage::FramePointer, LightStage::FramePointer, LightingModelPointer, LightClustersPointer, LightStage::ShadowFramePointer, glm::vec2>;
+    using Config = RenderTransparentDeferredConfig;
+    using JobModel = render::Job::ModelI<RenderTransparentDeferred, Inputs, Config>;
 
-    DrawDeferred(render::ShapePlumberPointer shapePlumber)
+    RenderTransparentDeferred(render::ShapePlumberPointer shapePlumber)
         : _shapePlumber{ shapePlumber } {}
 
     void configure(const Config& config) { _maxDrawn = config.maxDrawn; }
@@ -136,21 +137,54 @@ signals:
 
 class RenderDeferredTask {
 public:
-    using Input = render::VaryingSet2<RenderFetchCullSortTask::Output, RenderShadowTask::Output>;
+    using Input = render::VaryingSet4<RenderFetchCullSortTask::Output, LightingModelPointer, AssembleLightingStageTask::Output, RenderShadowTask::Output>;
     using Config = RenderDeferredTaskConfig;
     using JobModel = render::Task::ModelI<RenderDeferredTask, Input, Config>;
 
     RenderDeferredTask();
 
     void configure(const Config& config);
-    void build(JobModel& task, const render::Varying& inputs, render::Varying& outputs, bool renderShadows);
+    void build(JobModel& task, const render::Varying& input, render::Varying& output);
 
 private:
-    static const render::Varying addSelectItemJobs(JobModel& task,
-                                                   const char* selectionName,
-                                                   const render::Varying& metas,
-                                                   const render::Varying& opaques,
-                                                   const render::Varying& transparents);
+};
+
+
+class PreparePrimaryFramebufferConfig : public render::Job::Config {
+    Q_OBJECT
+    Q_PROPERTY(float resolutionScale  WRITE setResolutionScale READ getResolutionScale)
+public:
+    float getResolutionScale() const { return resolutionScale; }
+    void setResolutionScale(float scale) {
+        const float SCALE_RANGE_MIN = 0.1f;
+        const float SCALE_RANGE_MAX = 2.0f;
+        resolutionScale = std::max(SCALE_RANGE_MIN, std::min(SCALE_RANGE_MAX, scale));
+    }
+
+signals:
+    void dirty();
+
+protected:
+    float resolutionScale{ 1.0f };
+};
+
+class PreparePrimaryFramebuffer {
+public:
+
+    using Output = gpu::FramebufferPointer;
+    using Config = PreparePrimaryFramebufferConfig;
+    using JobModel = render::Job::ModelO<PreparePrimaryFramebuffer, Output, Config>;
+
+    PreparePrimaryFramebuffer(float resolutionScale = 1.0f) : _resolutionScale{ resolutionScale } {}
+    void configure(const Config& config);
+    void run(const render::RenderContextPointer& renderContext, Output& primaryFramebuffer);
+
+    gpu::FramebufferPointer _primaryFramebuffer;
+    float _resolutionScale{ 1.0f };
+
+private:
+
+    static gpu::FramebufferPointer createFramebuffer(const char* name, const glm::uvec2& size);
 };
 
 #endif  // hifi_RenderDeferredTask_h

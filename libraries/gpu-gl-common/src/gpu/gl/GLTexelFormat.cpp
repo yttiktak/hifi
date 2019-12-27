@@ -33,8 +33,8 @@ using namespace gpu::gl;
 #define GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT 0x8E8F
 #endif
 
-bool GLTexelFormat::isCompressed() const {
-    switch (internalFormat) {
+bool GLTexelFormat::isCompressed(GLenum format) {
+    switch (format) {
         case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
         case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
         case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
@@ -91,6 +91,11 @@ bool GLTexelFormat::isCompressed() const {
             return false;
     }
 }
+
+bool GLTexelFormat::isCompressed() const {
+    return isCompressed(internalFormat);
+}
+
 
 GLenum GLTexelFormat::evalGLTexelFormatInternal(const gpu::Element& dstFormat) {
     GLenum result = GL_RGBA8;
@@ -329,6 +334,8 @@ GLenum GLTexelFormat::evalGLTexelFormatInternal(const gpu::Element& dstFormat) {
                             result = GL_RGBA8_SNORM;
                             break;
                         case gpu::NINT2_10_10_10:
+                            result = GL_RGB10_A2;
+                            break;
                         case gpu::NUINT32:
                         case gpu::NINT32:
                         case gpu::COMPRESSED:
@@ -729,9 +736,9 @@ GLTexelFormat GLTexelFormat::evalGLTexelFormat(const Element& dstFormat, const E
                     texel.internalFormat = GL_DEPTH_COMPONENT24;
                     break;
                 }
+                case gpu::NINT2_10_10_10:
                 case gpu::COMPRESSED:
                 case gpu::NUINT2:
-                case gpu::NINT2_10_10_10:
                 case gpu::NUM_TYPES: { // quiet compiler
                     Q_UNREACHABLE();
                 }
@@ -893,9 +900,12 @@ GLTexelFormat GLTexelFormat::evalGLTexelFormat(const Element& dstFormat, const E
                     texel.format = GL_RGBA;
                     texel.internalFormat = GL_RGBA2;
                     break;
+                case gpu::NINT2_10_10_10:
+                    texel.format = GL_RGBA;
+                    texel.internalFormat = GL_RGB10_A2;
+                    break;
                 case gpu::NUINT32:
                 case gpu::NINT32:
-                case gpu::NINT2_10_10_10:
                 case gpu::COMPRESSED:
                 case gpu::NUM_TYPES: // quiet compiler
                     Q_UNREACHABLE();

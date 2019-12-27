@@ -9,7 +9,7 @@
 /* global Script, MyAvatar, Controller, RIGHT_HAND, LEFT_HAND, getControllerJointIndex,
    enableDispatcherModule, disableDispatcherModule, Messages, HAPTIC_PULSE_STRENGTH, HAPTIC_PULSE_DURATION,
    makeDispatcherModuleParameters, Overlays, makeRunningValues, Vec3, resizeTablet, getTabletWidthFromSettings,
-   NEAR_GRAB_RADIUS, HMD, Uuid
+   NEAR_GRAB_RADIUS, HMD, Uuid, getEnabledModuleByName
 */
 
 Script.include("/~/system/libraries/controllerDispatcherUtils.js");
@@ -44,6 +44,10 @@ Script.include("/~/system/libraries/utils.js");
 
         this.otherHandIsParent = function(props) {
             return this.getOtherModule().thisHandIsParent(props);
+        };
+
+        this.isGrabbedThingVisible = function() {
+            return Overlays.getProperty(this.grabbedThingID, "visible");
         };
 
         this.thisHandIsParent = function(props) {
@@ -113,11 +117,12 @@ Script.include("/~/system/libraries/utils.js");
                 this.previousParentID[this.grabbedThingID] = grabbedProperties.parentID;
                 this.previousParentJointIndex[this.grabbedThingID] = grabbedProperties.parentJointIndex;
             }
-            Overlays.editOverlay(this.grabbedThingID, reparentProps);
 
             // resizeTablet to counter adjust offsets to account for change of scale from sensorToWorldMatrix
             if (HMD.tabletID && this.grabbedThingID === HMD.tabletID) {
-                resizeTablet(getTabletWidthFromSettings(), reparentProps.parentJointIndex);
+                reparentAndScaleTablet(getTabletWidthFromSettings(), reparentProps);
+            } else {
+                Entities.editEntity(this.grabbedThingID, reparentProps);
             }
 
             Messages.sendMessage('Hifi-Object-Manipulation', JSON.stringify({
@@ -136,7 +141,7 @@ Script.include("/~/system/libraries/utils.js");
                 });
             } else if (!this.robbed){
                 // before we grabbed it, overlay was a child of something; put it back.
-                Overlays.editOverlay(this.grabbedThingID, {
+                Entities.editEntity(this.grabbedThingID, {
                     parentID: this.previousParentID[this.grabbedThingID],
                     parentJointIndex: this.previousParentJointIndex[this.grabbedThingID]
                 });
@@ -172,10 +177,23 @@ Script.include("/~/system/libraries/utils.js");
             return null;
         };
 
+        this.isEditing = function () {
+            var inEditModeModule = getEnabledModuleByName(this.hand === RIGHT_HAND
+                ? "RightHandInEditMode" : "LeftHandInEditMode");
+            if (inEditModeModule && inEditModeModule.isEditing) {
+                return true;
+            }
+            var inVREditModeModule = getEnabledModuleByName(this.hand === RIGHT_HAND
+                ? "RightHandInVREditMode" : "LeftHandInVREditMode");
+            if (inVREditModeModule && inVREditModeModule.isEditing) {
+                return true;
+            }
+            return false;
+        };
 
         this.isReady = function (controllerData) {
-            if ((controllerData.triggerClicks[this.hand] === 0 &&
-                 controllerData.secondaryValues[this.hand] === 0)) {
+            if ((controllerData.triggerClicks[this.hand] === 0 && controllerData.secondaryValues[this.hand] === 0)
+                    || this.isEditing()) {
                 this.robbed = false;
                 return makeRunningValues(false, [], []);
             }
@@ -198,7 +216,8 @@ Script.include("/~/system/libraries/utils.js");
         };
 
         this.run = function (controllerData) {
-            if (controllerData.triggerClicks[this.hand] === 0 && controllerData.secondaryValues[this.hand] === 0) {
+            if ((controllerData.triggerClicks[this.hand] === 0 && controllerData.secondaryValues[this.hand] === 0)
+                    || this.isEditing() || !this.isGrabbedThingVisible()) {
                 this.endNearParentingGrabOverlay();
                 this.robbed = false;
                 return makeRunningValues(false, [], []);

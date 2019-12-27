@@ -86,29 +86,29 @@ void ShapePlumber::addPipeline(const Key& key, const gpu::ShaderPointer& program
 void ShapePlumber::addPipeline(const Filter& filter, const gpu::ShaderPointer& program, const gpu::StatePointer& state,
         BatchSetter batchSetter, ItemSetter itemSetter) {
     ShapeKey key{ filter._flags };
+    auto reflection = program->getReflection();
     auto locations = std::make_shared<Locations>();
-    locations->albedoTextureUnit = program->getTextures().isValid(graphics::slot::texture::MaterialAlbedo);
-    locations->roughnessTextureUnit = program->getTextures().isValid(graphics::slot::texture::MaterialRoughness);
-    locations->normalTextureUnit = program->getTextures().isValid(graphics::slot::texture::MaterialNormal);
-    locations->metallicTextureUnit = program->getTextures().isValid(graphics::slot::texture::MaterialMetallic);
-    locations->emissiveTextureUnit = program->getTextures().isValid(graphics::slot::texture::MaterialEmissiveLightmap);
-    locations->occlusionTextureUnit = program->getTextures().isValid(graphics::slot::texture::MaterialOcclusion);
-    locations->lightingModelBufferUnit = program->getUniformBuffers().isValid(render_utils::slot::buffer::LightModel);
-    locations->skinClusterBufferUnit = program->getUniformBuffers().isValid(graphics::slot::buffer::Skinning);
-    locations->materialBufferUnit = program->getUniformBuffers().isValid(graphics::slot::buffer::Material);
-    locations->texMapArrayBufferUnit = program->getUniformBuffers().isValid(graphics::slot::buffer::TexMapArray);
-    locations->keyLightBufferUnit = program->getUniformBuffers().isValid(graphics::slot::buffer::KeyLight);
-    locations->lightBufferUnit = program->getUniformBuffers().isValid(graphics::slot::buffer::Light);
-    locations->lightAmbientBufferUnit = program->getUniformBuffers().isValid(graphics::slot::buffer::AmbientLight);
-    locations->lightAmbientMapUnit = program->getTextures().isValid(graphics::slot::texture::Skybox);
-    locations->fadeMaskTextureUnit = program->getTextures().isValid(render_utils::slot::texture::FadeMask);
-    locations->fadeParameterBufferUnit = program->getUniformBuffers().isValid(render_utils::slot::buffer::FadeParameters);
-    locations->fadeObjectParameterBufferUnit = program->getUniformBuffers().isValid(render_utils::slot::buffer::FadeObjectParameters);
-    locations->hazeParameterBufferUnit = program->getUniformBuffers().isValid(render_utils::slot::buffer::HazeParams);
+    locations->albedoTextureUnit = reflection.validTexture(graphics::slot::texture::MaterialAlbedo);
+    locations->roughnessTextureUnit = reflection.validTexture(graphics::slot::texture::MaterialRoughness);
+    locations->normalTextureUnit = reflection.validTexture(graphics::slot::texture::MaterialNormal);
+    locations->metallicTextureUnit = reflection.validTexture(graphics::slot::texture::MaterialMetallic);
+    locations->emissiveTextureUnit = reflection.validTexture(graphics::slot::texture::MaterialEmissiveLightmap);
+    locations->occlusionTextureUnit = reflection.validTexture(graphics::slot::texture::MaterialOcclusion);
+    locations->lightingModelBufferUnit = reflection.validUniformBuffer(render_utils::slot::buffer::LightModel);
+    locations->skinClusterBufferUnit = reflection.validUniformBuffer(graphics::slot::buffer::Skinning);
+    locations->materialBufferUnit = reflection.validUniformBuffer(graphics::slot::buffer::Material);
+    locations->keyLightBufferUnit = reflection.validUniformBuffer(graphics::slot::buffer::KeyLight);
+    locations->lightBufferUnit = reflection.validUniformBuffer(graphics::slot::buffer::Light);
+    locations->lightAmbientBufferUnit = reflection.validUniformBuffer(graphics::slot::buffer::AmbientLight);
+    locations->lightAmbientMapUnit = reflection.validTexture(graphics::slot::texture::Skybox);
+    locations->fadeMaskTextureUnit = reflection.validTexture(render_utils::slot::texture::FadeMask);
+    locations->fadeParameterBufferUnit = reflection.validUniformBuffer(render_utils::slot::buffer::FadeParameters);
+    locations->fadeObjectParameterBufferUnit = reflection.validUniformBuffer(render_utils::slot::buffer::FadeObjectParameters);
+    locations->hazeParameterBufferUnit = reflection.validUniformBuffer(graphics::slot::buffer::HazeParams);
     if (key.isTranslucent()) {
-        locations->lightClusterGridBufferUnit = program->getUniformBuffers().isValid(render_utils::slot::buffer::LightClusterGrid);
-        locations->lightClusterContentBufferUnit = program->getUniformBuffers().isValid(render_utils::slot::buffer::LightClusterContent);
-        locations->lightClusterFrustumBufferUnit = program->getUniformBuffers().isValid(render_utils::slot::buffer::LightClusterFrustumGrid);
+        locations->lightClusterGridBufferUnit = reflection.validUniformBuffer(render_utils::slot::buffer::LightClusterGrid);
+        locations->lightClusterContentBufferUnit = reflection.validUniformBuffer(render_utils::slot::buffer::LightClusterContent);
+        locations->lightClusterFrustumBufferUnit = reflection.validUniformBuffer(render_utils::slot::buffer::LightClusterFrustumGrid);
     }
 
     {
@@ -134,7 +134,7 @@ const ShapePipelinePointer ShapePlumber::pickPipeline(RenderArgs* args, const Ke
                 auto factoryIt = ShapePipeline::_globalCustomFactoryMap.find(key.getCustom());
                 if ((factoryIt != ShapePipeline::_globalCustomFactoryMap.end()) && (factoryIt)->second) {
                     // found a factory for the custom key, can now generate a shape pipeline for this case:
-                    addPipelineHelper(Filter(key), key, 0, (factoryIt)->second(*this, key, *(args->_batch)));
+                    addPipelineHelper(Filter(key), key, 0, (factoryIt)->second(*this, key, args));
 
                     return pickPipeline(args, key);
                 } else {

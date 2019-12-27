@@ -10,6 +10,8 @@
 //
 #include "ViewTask.h"
 
+#include <Profile.h>
+
 using namespace workload;
 
 
@@ -31,13 +33,25 @@ void SetupViews::run(const WorkloadContextPointer& renderContext, const Input& i
     auto& outViews = outputs;
     outViews.clear();
 
-    // Filter the first view centerer on the avatar head if needed
     if (_views.size() >= 2) {
+        // when inputs contains two or more views:
+        //   index 0 = view from avatar's head
+        //   index 1 = view from camera
+        //   index 2 and higher = secondary camera and whatever
         if (data.useAvatarView) {
+            // for debug purposes we keep the head view and skip that of the camera
             outViews.push_back(_views[0]);
             outViews.insert(outViews.end(), _views.begin() + 2, _views.end());
         } else {
-            outViews.insert(outViews.end(), _views.begin() + 1, _views.end());
+            // otherwise we use all of the views...
+            const float MIN_HEAD_CAMERA_SEPARATION_SQUARED = MIN_VIEW_BACK_FRONTS[0][1] * MIN_VIEW_BACK_FRONTS[0][1];
+            if (glm::distance2(_views[0].origin, _views[1].origin) < MIN_HEAD_CAMERA_SEPARATION_SQUARED) {
+                // ... unless the first two are close enough to be considered the same
+                // in which case we only keep one of them
+                outViews.insert(outViews.end(), _views.begin() + 1, _views.end());
+            } else {
+                outViews = _views;
+            }
         }
     } else {
         outViews = _views;
@@ -70,7 +84,7 @@ void SetupViews::run(const WorkloadContextPointer& renderContext, const Input& i
 
 
 ControlViews::ControlViews() {
-    for (int32_t i = 0; i < workload::Region::NUM_VIEW_REGIONS; i++) {
+    for (uint32_t i = 0; i < workload::Region::NUM_TRACKED_REGIONS; i++) {
         regionBackFronts[i] = MIN_VIEW_BACK_FRONTS[i];
         regionRegulators[i] = Regulator(std::chrono::milliseconds(2), MIN_VIEW_BACK_FRONTS[i], MAX_VIEW_BACK_FRONTS[i], glm::vec2(RELATIVE_STEP_DOWN), glm::vec2(RELATIVE_STEP_UP));
     }
@@ -154,7 +168,7 @@ glm::vec2 Regulator::clamp(const glm::vec2& backFront) const {
 
 void ControlViews::regulateViews(workload::Views& outViews, const workload::Timings& timings) {
     for (auto& outView : outViews) {
-        for (int32_t r = 0; r < workload::Region::NUM_VIEW_REGIONS; r++) {
+        for (uint32_t r = 0; r < workload::Region::NUM_TRACKED_REGIONS; r++) {
             outView.regionBackFronts[r] = regionBackFronts[r];
         }
     }
@@ -169,15 +183,17 @@ void ControlViews::regulateViews(workload::Views& outViews, const workload::Timi
 
     auto loopDuration = timings[5];
     regionBackFronts[workload::Region::R1] = regionRegulators[workload::Region::R1].run(loopDuration, timings[2] + timings[3], regionBackFronts[workload::Region::R1]);
+    PROFILE_COUNTER(workload, "R1Front", { { "R1", regionBackFronts[workload::Region::R1].y} } );
     regionBackFronts[workload::Region::R2] = regionRegulators[workload::Region::R2].run(loopDuration, timings[2] + timings[3], regionBackFronts[workload::Region::R2]);
+    PROFILE_COUNTER(workload, "R2Front", { { "R2", regionBackFronts[workload::Region::R2].y } } );
     regionBackFronts[workload::Region::R3] = regionRegulators[workload::Region::R3].run(loopDuration, timings[4], regionBackFronts[workload::Region::R3]);
+    PROFILE_COUNTER(workload, "R3Front", { { "R3", regionBackFronts[workload::Region::R3].y } } );
 
     enforceRegionContainment();
     for (auto& outView : outViews) {
         outView.regionBackFronts[workload::Region::R1] = regionBackFronts[workload::Region::R1];
         outView.regionBackFronts[workload::Region::R2] = regionBackFronts[workload::Region::R2];
         outView.regionBackFronts[workload::Region::R3] = regionBackFronts[workload::Region::R3];
-
         workload::View::updateRegionsFromBackFronts(outView);
     }
 }
@@ -187,13 +203,13 @@ void ControlViews::enforceRegionContainment() {
     // and each region should never exceed its min/max limits
     const glm::vec2 MIN_REGION_GAP = { 1.0f, 2.0f };
     // enforce outside --> in
-    for (int32_t i = workload::Region::NUM_VIEW_REGIONS - 2; i >= 0; --i) {
+    for (int32_t i = (int32_t)workload::Region::NUM_TRACKED_REGIONS - 2; i >= 0; --i) {
         int32_t j = i + 1;
         regionBackFronts[i] = regionRegulators[i].clamp(glm::min(regionBackFronts[i], regionBackFronts[j] - MIN_REGION_GAP));
     }
     // enforce inside --> out
-    for (int32_t i = 1; i < workload::Region::NUM_VIEW_REGIONS; ++i) {
-        int32_t j = i - 1;
+    for (uint32_t i = 1; i < workload::Region::NUM_TRACKED_REGIONS; ++i) {
+        uint32_t j = i - 1;
         regionBackFronts[i] = regionRegulators[i].clamp(glm::max(regionBackFronts[i], regionBackFronts[j] + MIN_REGION_GAP));
     }
 }

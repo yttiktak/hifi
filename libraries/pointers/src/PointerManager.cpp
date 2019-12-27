@@ -54,6 +54,24 @@ void PointerManager::disablePointer(unsigned int uid) const {
     }
 }
 
+bool PointerManager::isPointerEnabled(unsigned int uid) const {
+    auto pointer = find(uid);
+    if (pointer) {
+        return pointer->isEnabled();
+    }
+    return false;
+}
+
+QVector<unsigned int> PointerManager::getPointers() const {
+    QVector<unsigned int> pointers;
+    withReadLock([&] {
+        for (auto it = _pointers.cbegin(); it != _pointers.cend(); ++it) {
+            pointers.push_back(it->first);
+        }
+    });
+    return pointers;
+}
+
 void PointerManager::setRenderState(unsigned int uid, const std::string& renderState) const {
     auto pointer = find(uid);
     if (pointer) {
@@ -84,6 +102,14 @@ QVariantMap PointerManager::getPointerProperties(unsigned int uid) const {
     } else {
         return QVariantMap();
     }
+}
+
+QVariantMap PointerManager::getPointerScriptParameters(unsigned int uid) const {
+    auto pointer = find(uid);
+    if (pointer) {
+        return pointer->getScriptParameters();
+    }
+    return QVariantMap();
 }
 
 void PointerManager::update() {
@@ -124,10 +150,10 @@ void PointerManager::setLength(unsigned int uid, float length) const {
     }
 }
 
-void PointerManager::setLockEndUUID(unsigned int uid, const QUuid& objectID, bool isOverlay, const glm::mat4& offsetMat) const {
+void PointerManager::setLockEndUUID(unsigned int uid, const QUuid& objectID, bool isAvatar, const glm::mat4& offsetMat) const {
     auto pointer = find(uid);
     if (pointer) {
-        pointer->setLockEndUUID(objectID, isOverlay, offsetMat);
+        pointer->setLockEndUUID(objectID, isAvatar, offsetMat);
     }
 }
 

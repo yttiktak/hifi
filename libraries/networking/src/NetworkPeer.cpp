@@ -18,7 +18,6 @@
 #include <SharedUtil.h>
 #include <UUID.h>
 
-#include "BandwidthRecorder.h"
 #include "NetworkLogging.h"
 #include <Trace.h>
 #include "NodeType.h"
@@ -60,13 +59,13 @@ void NetworkPeer::setPublicSocket(const HifiSockAddr& publicSocket) {
         
         bool wasOldSocketNull = _publicSocket.isNull();
 
-        auto temp = _publicSocket.objectName();
+        auto previousSocket = _publicSocket;
         _publicSocket = publicSocket;
-        _publicSocket.setObjectName(temp);
+        _publicSocket.setObjectName(previousSocket.objectName());
         
         if (!wasOldSocketNull) {
-            qCDebug(networking) << "Public socket change for node" << *this;
-            emit socketUpdated();
+            qCDebug(networking) << "Public socket change for node" << *this << "; previously" << previousSocket;
+            emit socketUpdated(previousSocket, _publicSocket);
         }
     }
 }
@@ -80,13 +79,13 @@ void NetworkPeer::setLocalSocket(const HifiSockAddr& localSocket) {
         
         bool wasOldSocketNull = _localSocket.isNull();
         
-        auto temp = _localSocket.objectName();
+        auto previousSocket = _localSocket;
         _localSocket = localSocket;
-        _localSocket.setObjectName(temp);
+        _localSocket.setObjectName(previousSocket.objectName());
 
         if (!wasOldSocketNull) {
-            qCDebug(networking) << "Local socket change for node" << *this;
-            emit socketUpdated();
+            qCDebug(networking) << "Local socket change for node" << *this << "; previously" << previousSocket;
+            emit socketUpdated(previousSocket, _localSocket);
         }
     }
 }
@@ -100,13 +99,13 @@ void NetworkPeer::setSymmetricSocket(const HifiSockAddr& symmetricSocket) {
         
         bool wasOldSocketNull = _symmetricSocket.isNull();
         
-        auto temp = _symmetricSocket.objectName();
+        auto previousSocket = _symmetricSocket;
         _symmetricSocket = symmetricSocket;
-        _symmetricSocket.setObjectName(temp);
+        _symmetricSocket.setObjectName(previousSocket.objectName());
         
         if (!wasOldSocketNull) {
-            qCDebug(networking) << "Symmetric socket change for node" << *this;
-            emit socketUpdated();
+            qCDebug(networking) << "Symmetric socket change for node" << *this << "; previously" << previousSocket;
+            emit socketUpdated(previousSocket, _symmetricSocket);
         }
     }
 }
@@ -141,7 +140,7 @@ void NetworkPeer::activatePublicSocket() {
 
 void NetworkPeer::activateSymmetricSocket() {
     if (_activeSocket != &_symmetricSocket) {
-        qCDebug(networking) << "Activating symmetric socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
+        qCDebug(networking) << "Activating symmetric socket (" << _symmetricSocket << ") for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
         setActiveSocket(&_symmetricSocket);
     }
 }
@@ -228,37 +227,4 @@ QDebug operator<<(QDebug debug, const NetworkPeer &peer) {
         << "- public:" << peer.getPublicSocket()
         << "- local:" << peer.getLocalSocket();
     return debug;
-}
-
-
-// FIXME this is a temporary implementation to determine if this is the right approach.
-// If so, migrate the BandwidthRecorder into the NetworkPeer class
-using BandwidthRecorderPtr = QSharedPointer<BandwidthRecorder>;
-static QHash<QUuid, BandwidthRecorderPtr> PEER_BANDWIDTH;
-
-BandwidthRecorder& getBandwidthRecorder(const QUuid & uuid) {
-    if (!PEER_BANDWIDTH.count(uuid)) {
-        PEER_BANDWIDTH.insert(uuid, QSharedPointer<BandwidthRecorder>::create());
-    }
-    return *PEER_BANDWIDTH[uuid].data();
-}
-
-void NetworkPeer::recordBytesSent(int count) const {
-    auto& bw = getBandwidthRecorder(_uuid);
-    bw.updateOutboundData(0, count);
-}
-
-void NetworkPeer::recordBytesReceived(int count) const {
-    auto& bw = getBandwidthRecorder(_uuid);
-    bw.updateInboundData(0, count);
-}
-
-float NetworkPeer::getOutboundBandwidth() const {
-    auto& bw = getBandwidthRecorder(_uuid);
-    return bw.getAverageOutputKilobitsPerSecond(0);
-}
-
-float NetworkPeer::getInboundBandwidth() const {
-    auto& bw = getBandwidthRecorder(_uuid);
-    return bw.getAverageInputKilobitsPerSecond(0);
 }

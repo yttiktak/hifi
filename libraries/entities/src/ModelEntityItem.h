@@ -55,23 +55,28 @@ public:
     void setShapeType(ShapeType type) override;
     virtual ShapeType getShapeType() const override;
 
-
     // TODO: Move these to subclasses, or other appropriate abstraction
     // getters/setters applicable to models and particles
+    glm::u8vec3 getColor() const;
+    void setColor(const glm::u8vec3& value);
 
-    const rgbColor& getColor() const { return _color; }
-    xColor getXColor() const;
     bool hasModel() const;
     virtual bool hasCompoundShapeURL() const;
 
     static const QString DEFAULT_MODEL_URL;
     QString getModelURL() const;
 
+    virtual glm::vec3 getScaledDimensions() const override;
+    virtual void setScaledDimensions(const glm::vec3& value) override;
+
+    virtual const Transform getTransform(bool& success, int depth = 0) const override;
+    virtual const Transform getTransform() const override;
+
     static const QString DEFAULT_COMPOUND_SHAPE_URL;
     QString getCompoundShapeURL() const;
 
-    void setColor(const rgbColor& value);
-    void setColor(const xColor& value);
+    // Returns the URL used for the collision shape
+    QString getCollisionShapeURL() const;
 
     // model related properties
     virtual void setModelURL(const QString& url);
@@ -80,9 +85,10 @@ public:
     // Animation related items...
     AnimationPropertyGroup getAnimationProperties() const;
 
+    // TODO: audit and remove unused Animation accessors
     bool hasAnimation() const;
     QString getAnimationURL() const;
-    void setAnimationURL(const QString& url);
+    virtual void setAnimationURL(const QString& url);
 
     void setAnimationCurrentFrame(float value);
     void setAnimationIsPlaying(bool value);
@@ -100,11 +106,8 @@ public:
     void setRelayParentJoints(bool relayJoints);
     bool getRelayParentJoints() const;
 
-    void setAnimationFirstFrame(float firstFrame);
-    float getAnimationFirstFrame() const;
-
-    void setAnimationLastFrame(float lastFrame);
-    float getAnimationLastFrame() const;
+    void setGroupCulled(bool value);
+    bool getGroupCulled() const;
 
     bool getAnimationIsPlaying() const;
     float getAnimationCurrentFrame() const;
@@ -114,8 +117,6 @@ public:
     static const QString DEFAULT_TEXTURES;
     const QString getTextures() const;
     void setTextures(const QString& textures);
-
-    virtual bool shouldBePhysical() const override;
 
     virtual void setJointRotations(const QVector<glm::quat>& rotations);
     virtual void setJointRotationsSet(const QVector<bool>& rotationsSet);
@@ -128,6 +129,9 @@ public:
     QVector<bool> getJointRotationsSet() const;
     QVector<glm::vec3> getJointTranslations() const;
     QVector<bool> getJointTranslationsSet() const;
+
+    glm::vec3 getModelScale() const;
+    void setModelScale(const glm::vec3& modelScale);
 
 private:
     void setAnimationSettings(const QString& value); // only called for old bitstream format
@@ -157,18 +161,19 @@ protected:
     QVector<ModelJointData> _localJointData;
     int _lastKnownCurrentFrame{-1};
 
-    rgbColor _color;
+    glm::u8vec3 _color;
+    glm::vec3 _modelScale { 1.0f };
     QString _modelURL;
     bool _relayParentJoints;
+    bool _groupCulled { false };
 
     ThreadSafeValueCache<QString> _compoundShapeURL;
 
     AnimationPropertyGroup _animationProperties;
 
-    mutable QReadWriteLock _texturesLock;
     QString _textures;
 
-    ShapeType _shapeType = SHAPE_TYPE_NONE;
+    ShapeType _shapeType { SHAPE_TYPE_NONE };
 
 private:
     uint64_t _lastAnimated{ 0 };

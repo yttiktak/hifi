@@ -48,17 +48,22 @@ bool operator!=(const AnimationPropertyGroup& a, const AnimationPropertyGroup& b
 
 
 /**jsdoc
- * The AnimationProperties are used to configure an animation.
+ * An animation is configured by the following properties:
  * @typedef {object} Entities.AnimationProperties
- * @property {string} url="" - The URL of the FBX file that has the animation.
+ * @property {string} url="" - The URL of the glTF or FBX file that has the animation. glTF files may be in JSON or binary 
+ *     format (".gltf" or ".glb" URLs respectively).
+ *     <p><strong>Warning:</strong> glTF animations currently do not always animate correctly.</p>
+ * @property {boolean} allowTranslation=true - <code>true</code> to enable translations contained in the animation to be
+ *     played, <code>false</code> to disable translations.
  * @property {number} fps=30 - The speed in frames/s that the animation is played at.
  * @property {number} firstFrame=0 - The first frame to play in the animation.
  * @property {number} lastFrame=100000 - The last frame to play in the animation.
  * @property {number} currentFrame=0 - The current frame being played in the animation.
- * @property {boolean} running=false - If <code>true</code> then the animation should play.
- * @property {boolean} loop=true - If <code>true</code> then the animation should be continuously repeated in a loop.
- * @property {boolean} hold=false - If <code>true</code> then the rotations and translations of the last frame played should be
- *     maintained when the animation stops playing.
+ * @property {boolean} running=false - <code>true</code> if the animation should play, <code>false</code> if it shouldn't.
+ * @property {boolean} loop=true - <code>true</code> if the animation is continuously repeated in a loop, <code>false</code> if 
+ *     it isn't.
+ * @property {boolean} hold=false - <code>true</code> if the rotations and translations of the last frame played are 
+ *     maintained when the animation stops playing, <code>false</code> if they aren't.
  */
 void AnimationPropertyGroup::copyToScriptValue(const EntityPropertyFlags& desiredProperties, QScriptValue& properties, QScriptEngine* engine, bool skipDefaults, EntityItemProperties& defaultEntityProperties) const {
     COPY_GROUP_PROPERTY_TO_QSCRIPTVALUE(PROP_ANIMATION_URL, Animation, animation, URL, url);
@@ -173,7 +178,6 @@ void AnimationPropertyGroup::setFromOldAnimationSettings(const QString& value) {
 
 void AnimationPropertyGroup::debugDump() const {
     qCDebug(entities) << "   AnimationPropertyGroup: ---------------------------------------------";
-    qCDebug(entities) << "       url:" << getURL() << " has changed:" << urlChanged();
     qCDebug(entities) << "       fps:" << getFPS() << " has changed:" << fpsChanged();
     qCDebug(entities) << "currentFrame:" << getCurrentFrame() << " has changed:" << currentFrameChanged();
     qCDebug(entities) << "allowTranslation:" << getAllowTranslation() << " has changed:" << allowTranslationChanged(); 
@@ -183,14 +187,29 @@ void AnimationPropertyGroup::listChangedProperties(QList<QString>& out) {
     if (urlChanged()) {
         out << "animation-url";
     }
+    if (allowTranslationChanged()) {
+        out << "animation-allowTranslation";
+    }
     if (fpsChanged()) {
         out << "animation-fps";
     }
     if (currentFrameChanged()) {
         out << "animation-currentFrame";
     }
-    if (allowTranslationChanged()) {
-        out << "animation-allowTranslation";
+    if (runningChanged()) {
+        out << "animation-running";
+    }
+    if (loopChanged()) {
+        out << "animation-loop";
+    }
+    if (firstFrameChanged()) {
+        out << "animation-firstFrame";
+    }
+    if (lastFrameChanged()) {
+        out << "animation-lastFrame";
+    }
+    if (holdChanged()) {
+        out << "animation-hold";
     }
 }
 
@@ -225,7 +244,6 @@ bool AnimationPropertyGroup::decodeFromEditPacket(EntityPropertyFlags& propertyF
 
     READ_ENTITY_PROPERTY(PROP_ANIMATION_URL, QString, setURL);
     READ_ENTITY_PROPERTY(PROP_ANIMATION_ALLOW_TRANSLATION, bool, setAllowTranslation);
-
     READ_ENTITY_PROPERTY(PROP_ANIMATION_FPS, float, setFPS);
     READ_ENTITY_PROPERTY(PROP_ANIMATION_FRAME_INDEX, float, setCurrentFrame);
     READ_ENTITY_PROPERTY(PROP_ANIMATION_PLAYING, bool, setRunning);
@@ -235,6 +253,7 @@ bool AnimationPropertyGroup::decodeFromEditPacket(EntityPropertyFlags& propertyF
     READ_ENTITY_PROPERTY(PROP_ANIMATION_HOLD, bool, setHold);
 
     DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_URL, URL);
+    DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_ALLOW_TRANSLATION, AllowTranslation);
     DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_FPS, FPS);
     DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_FRAME_INDEX, CurrentFrame);
     DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_PLAYING, Running);
@@ -242,7 +261,6 @@ bool AnimationPropertyGroup::decodeFromEditPacket(EntityPropertyFlags& propertyF
     DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_FIRST_FRAME, FirstFrame);
     DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_LAST_FRAME, LastFrame);
     DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_HOLD, Hold);
-    DECODE_GROUP_PROPERTY_HAS_CHANGED(PROP_ANIMATION_ALLOW_TRANSLATION, AllowTranslation);
     
     processedBytes += bytesRead;
 
@@ -253,6 +271,7 @@ bool AnimationPropertyGroup::decodeFromEditPacket(EntityPropertyFlags& propertyF
 
 void AnimationPropertyGroup::markAllChanged() {
     _urlChanged = true;
+    _allowTranslationChanged = true;
     _fpsChanged = true;
     _currentFrameChanged = true;
     _runningChanged = true;
@@ -260,13 +279,13 @@ void AnimationPropertyGroup::markAllChanged() {
     _firstFrameChanged = true;
     _lastFrameChanged = true;
     _holdChanged = true;
-    _allowTranslationChanged = true;
 }
 
 EntityPropertyFlags AnimationPropertyGroup::getChangedProperties() const {
     EntityPropertyFlags changedProperties;
 
     CHECK_PROPERTY_CHANGE(PROP_ANIMATION_URL, url);
+    CHECK_PROPERTY_CHANGE(PROP_ANIMATION_ALLOW_TRANSLATION, allowTranslation);
     CHECK_PROPERTY_CHANGE(PROP_ANIMATION_FPS, fps);
     CHECK_PROPERTY_CHANGE(PROP_ANIMATION_FRAME_INDEX, currentFrame);
     CHECK_PROPERTY_CHANGE(PROP_ANIMATION_PLAYING, running);
@@ -274,7 +293,6 @@ EntityPropertyFlags AnimationPropertyGroup::getChangedProperties() const {
     CHECK_PROPERTY_CHANGE(PROP_ANIMATION_FIRST_FRAME, firstFrame);
     CHECK_PROPERTY_CHANGE(PROP_ANIMATION_LAST_FRAME, lastFrame);
     CHECK_PROPERTY_CHANGE(PROP_ANIMATION_HOLD, hold);
-    CHECK_PROPERTY_CHANGE(PROP_ANIMATION_ALLOW_TRANSLATION, allowTranslation);
 
     return changedProperties;
 }
@@ -310,6 +328,7 @@ EntityPropertyFlags AnimationPropertyGroup::getEntityProperties(EncodeBitstreamP
     EntityPropertyFlags requestedProperties;
 
     requestedProperties += PROP_ANIMATION_URL;
+    requestedProperties += PROP_ANIMATION_ALLOW_TRANSLATION;
     requestedProperties += PROP_ANIMATION_FPS;
     requestedProperties += PROP_ANIMATION_FRAME_INDEX;
     requestedProperties += PROP_ANIMATION_PLAYING;
@@ -317,7 +336,6 @@ EntityPropertyFlags AnimationPropertyGroup::getEntityProperties(EncodeBitstreamP
     requestedProperties += PROP_ANIMATION_FIRST_FRAME;
     requestedProperties += PROP_ANIMATION_LAST_FRAME;
     requestedProperties += PROP_ANIMATION_HOLD;
-    requestedProperties += PROP_ANIMATION_ALLOW_TRANSLATION;
 
     return requestedProperties;
 }

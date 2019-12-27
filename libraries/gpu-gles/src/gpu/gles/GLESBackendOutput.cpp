@@ -29,6 +29,24 @@ public:
         GLint currentFBO = -1;
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &currentFBO);
         glBindFramebuffer(GL_FRAMEBUFFER, _fbo);
+
+        vec2 focalPoint{ -1.0f };
+
+#if 0
+        {
+            auto backend = _backend.lock();
+            if (backend && backend->isStereo()) {
+                glm::mat4 projections[2];
+                backend->getStereoProjections(projections);
+                vec4 fov = extractFov(projections[0]);
+                float fovwidth = fov.x + fov.y;
+                float fovheight = fov.z + fov.w;
+                focalPoint.x = fov.y / fovwidth;
+                focalPoint.y = (fov.z / fovheight) - 0.5f;
+            }
+        }
+#endif
+
         gl::GLTexture* gltexture = nullptr;
         TexturePointer surface;
         if (_gpuObject.getColorStamps() != _colorStamps) {
@@ -58,7 +76,7 @@ public:
                     surface = b._texture;
                     if (surface) {
                         Q_ASSERT(TextureUsageType::RENDERBUFFER == surface->getUsageType());
-                        gltexture = backend->syncGPUObject(surface); 
+                        gltexture = backend->syncGPUObject(surface);
                     } else {
                         gltexture = nullptr;
                     }
@@ -66,6 +84,26 @@ public:
                     if (gltexture) {
                         if (gltexture->_target == GL_TEXTURE_2D) {
                             glFramebufferTexture2D(GL_FRAMEBUFFER, colorAttachments[unit], GL_TEXTURE_2D, gltexture->_texture, 0);
+#if 0
+                            if (glTextureFoveationParametersQCOM && focalPoint.x != -1.0f) {
+                                static GLint FOVEATION_QUERY = 0;
+                                static std::once_flag once;
+                                std::call_once(once, [&]{
+                                    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_FOVEATED_FEATURE_QUERY_QCOM, &FOVEATION_QUERY);
+                                });
+                                static const float foveaArea = 4.0f;
+                                static const float gain = 16.0f;
+                                GLESBackend::GLESTexture* glestexture = static_cast<GLESBackend::GLESTexture*>(gltexture);
+                                glestexture->withPreservedTexture([=]{
+                                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_FOVEATED_FEATURE_BITS_QCOM, GL_FOVEATION_ENABLE_BIT_QCOM | GL_FOVEATION_SCALED_BIN_METHOD_BIT_QCOM);
+                                    glTextureFoveationParametersQCOM(_id, 0, 0, -focalPoint.x, focalPoint.y, gain * 2.0f, gain, foveaArea);
+                                    glTextureFoveationParametersQCOM(_id, 0, 1, focalPoint.x, focalPoint.y, gain * 2.0f, gain, foveaArea);
+                                });
+
+                            }
+#endif
+                        } else if (gltexture->_target == GL_TEXTURE_2D_MULTISAMPLE) {
+                            glFramebufferTexture2D(GL_FRAMEBUFFER, colorAttachments[unit], GL_TEXTURE_2D_MULTISAMPLE, gltexture->_texture, 0);
                         } else {
                             glFramebufferTextureLayer(GL_FRAMEBUFFER, colorAttachments[unit], gltexture->_texture, 0,
                                                       b._subresource);
@@ -98,6 +136,8 @@ public:
             if (gltexture) {
                 if (gltexture->_target == GL_TEXTURE_2D) {
                     glFramebufferTexture2D(GL_FRAMEBUFFER, attachement, GL_TEXTURE_2D, gltexture->_texture, 0);
+                } else if (gltexture->_target == GL_TEXTURE_2D_MULTISAMPLE) {
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, attachement, GL_TEXTURE_2D_MULTISAMPLE, gltexture->_texture, 0);
                 } else {
                     glFramebufferTextureLayer(GL_FRAMEBUFFER, attachement, gltexture->_texture, 0,
                                               _gpuObject.getDepthStencilBufferSubresource());

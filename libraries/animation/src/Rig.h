@@ -24,6 +24,9 @@
 #include "AnimNode.h"
 #include "AnimNodeLoader.h"
 #include "SimpleMovingAverage.h"
+#include "AnimUtil.h"
+#include "Flow.h"
+#include "AvatarConstants.h"
 
 class Rig;
 class AnimInverseKinematics;
@@ -85,10 +88,14 @@ public:
         AnimPose secondaryControllerPoses[NumSecondaryControllerTypes];  // rig space
         uint8_t secondaryControllerFlags[NumSecondaryControllerTypes];
         bool isTalking;
-        FBXJointShapeInfo hipsShapeInfo;
-        FBXJointShapeInfo spineShapeInfo;
-        FBXJointShapeInfo spine1ShapeInfo;
-        FBXJointShapeInfo spine2ShapeInfo;
+        float inputX = 0.0f;
+        float inputZ = 0.0f;
+        bool reactionEnabledFlags[NUM_AVATAR_BEGIN_END_REACTIONS];
+        bool reactionTriggers[NUM_AVATAR_TRIGGER_REACTIONS];
+        HFMJointShapeInfo hipsShapeInfo;
+        HFMJointShapeInfo spineShapeInfo;
+        HFMJointShapeInfo spine1ShapeInfo;
+        HFMJointShapeInfo spine2ShapeInfo;
     };
 
     struct EyeParameters {
@@ -104,7 +111,8 @@ public:
         Ground = 0,
         Takeoff,
         InAir,
-        Hover
+        Hover,
+        Seated
     };
 
     Rig();
@@ -113,14 +121,23 @@ public:
     void destroyAnimGraph();
 
     void overrideAnimation(const QString& url, float fps, bool loop, float firstFrame, float lastFrame);
+    bool isPlayingOverrideAnimation() const { return _userAnimState.clipNodeEnum != UserAnimState::None; };
     void restoreAnimation();
+    
+    void overrideHandAnimation(bool isLeft, const QString& url, float fps, bool loop, float firstFrame, float lastFrame);
+    void restoreHandAnimation(bool isLeft);
+
+    void overrideNetworkAnimation(const QString& url, float fps, bool loop, float firstFrame, float lastFrame);
+    void triggerNetworkRole(const QString& role);
+    void restoreNetworkAnimation();
+
     QStringList getAnimationRoles() const;
     void overrideRoleAnimation(const QString& role, const QString& url, float fps, bool loop, float firstFrame, float lastFrame);
     void restoreRoleAnimation(const QString& role);
 
-    void initJointStates(const FBXGeometry& geometry, const glm::mat4& modelOffset);
-    void reset(const FBXGeometry& geometry);
-    bool jointStatesEmpty();
+    void initJointStates(const HFMModel& hfmModel, const glm::mat4& modelOffset);
+    void reset(const HFMModel& hfmModel);
+    bool jointStatesEmpty() const;
     int getJointStateCount() const;
     int indexOfJoint(const QString& jointName) const;
     QString nameOfJoint(int jointIndex) const;
@@ -148,6 +165,8 @@ public:
     void setJointTranslation(int index, bool valid, const glm::vec3& translation, float priority);
     void setJointRotation(int index, bool valid, const glm::quat& rotation, float priority);
 
+    bool getIsJointOverridden(int jointIndex) const;
+
     // if translation and rotation is identity, position will be in rig space
     bool getJointPositionInWorldFrame(int jointIndex, glm::vec3& position,
                                       glm::vec3 translation, glm::quat rotation) const;
@@ -172,7 +191,8 @@ public:
     AnimPose getJointPose(int jointIndex) const;
 
     // Start or stop animations as needed.
-    void computeMotionAnimationState(float deltaTime, const glm::vec3& worldPosition, const glm::vec3& worldVelocity, const glm::quat& worldRotation, CharacterControllerState ccState);
+    void computeMotionAnimationState(float deltaTime, const glm::vec3& worldPosition, const glm::vec3& worldVelocity,
+                                     const glm::quat& worldRotation, CharacterControllerState ccState, float sensorToWorldScale);
 
     // Regardless of who started the animations or how many, update the joints.
     void updateAnimations(float deltaTime, const glm::mat4& rootTransform, const glm::mat4& rigToWorldTransform);
@@ -183,6 +203,7 @@ public:
     void initAnimGraph(const QUrl& url);
 
     AnimNode::ConstPointer getAnimNode() const { return _animNode; }
+    AnimNode::ConstPointer findAnimNodeByName(const QString& name) const;
     AnimSkeleton::ConstPointer getAnimSkeleton() const { return _animSkeleton; }
     QScriptValue addAnimationStateHandler(QScriptValue handler, QScriptValue propertiesList);
     void removeAnimationStateHandler(QScriptValue handler);
@@ -205,7 +226,7 @@ public:
     void copyJointsFromJointData(const QVector<JointData>& jointDataVec);
     void computeExternalPoses(const glm::mat4& modelOffsetMat);
 
-    void computeAvatarBoundingCapsule(const FBXGeometry& geometry, float& radiusOut, float& heightOut, glm::vec3& offsetOut) const;
+    void computeAvatarBoundingCapsule(const HFMModel& hfmModel, float& radiusOut, float& heightOut, glm::vec3& offsetOut) const;
 
     void setEnableInverseKinematics(bool enable);
     void setEnableAnimations(bool enable);
@@ -226,35 +247,45 @@ public:
     const AnimContext::DebugAlphaMap& getDebugAlphaMap() const { return _lastContext.getDebugAlphaMap(); }
     const AnimVariantMap& getAnimVars() const { return _lastAnimVars; }
     const AnimContext::DebugStateMachineMap& getStateMachineMap() const { return _lastContext.getStateMachineMap(); }
+    void initFlow(bool isActive);
+    Flow& getFlow() { return _internalFlow; }
 
-    void toggleSmoothPoleVectors() { _smoothPoleVectors = !_smoothPoleVectors; };
+    float getUnscaledEyeHeight() const;
+    void buildAbsoluteRigPoses(const AnimPoseVec& relativePoses, AnimPoseVec& absolutePosesOut) const;
+
+    int getOverrideJointCount() const;
+    bool getFlowActive() const;
+    bool getNetworkGraphActive() const;
+    void setDirectionalBlending(const QString& targetName, const glm::vec3& blendingTarget, const QString& alphaName, float alpha);
+
 signals:
     void onLoadComplete();
+    void onLoadFailed();
 
 protected:
     bool isIndexValid(int index) const { return _animSkeleton && index >= 0 && index < _animSkeleton->getNumJoints(); }
     void updateAnimationStateHandlers();
     void applyOverridePoses();
-    void buildAbsoluteRigPoses(const AnimPoseVec& relativePoses, AnimPoseVec& absolutePosesOut);
 
     void updateHead(bool headEnabled, bool hipsEnabled, const AnimPose& headMatrix);
     void updateHands(bool leftHandEnabled, bool rightHandEnabled, bool hipsEnabled, bool hipsEstimated,
                      bool leftArmEnabled, bool rightArmEnabled, bool headEnabled, float dt,
                      const AnimPose& leftHandPose, const AnimPose& rightHandPose,
-                     const FBXJointShapeInfo& hipsShapeInfo, const FBXJointShapeInfo& spineShapeInfo,
-                     const FBXJointShapeInfo& spine1ShapeInfo, const FBXJointShapeInfo& spine2ShapeInfo,
+                     const HFMJointShapeInfo& hipsShapeInfo, const HFMJointShapeInfo& spineShapeInfo,
+                     const HFMJointShapeInfo& spine1ShapeInfo, const HFMJointShapeInfo& spine2ShapeInfo,
                      const glm::mat4& rigToSensorMatrix, const glm::mat4& sensorToRigMatrix);
     void updateFeet(bool leftFootEnabled, bool rightFootEnabled, bool headEnabled,
                     const AnimPose& leftFootPose, const AnimPose& rightFootPose,
                     const glm::mat4& rigToSensorMatrix, const glm::mat4& sensorToRigMatrix);
+    void updateReactions(const ControllerParameters& params);
 
     void updateEyeJoint(int index, const glm::vec3& modelTranslation, const glm::quat& modelRotation, const glm::vec3& lookAt, const glm::vec3& saccade);
     void calcAnimAlpha(float speed, const std::vector<float>& referenceSpeeds, float* alphaOut) const;
 
     bool calculateElbowPoleVector(int handIndex, int elbowIndex, int armIndex, int oppositeArmIndex, glm::vec3& poleVector) const;
     glm::vec3 calculateKneePoleVector(int footJointIndex, int kneeJoint, int upLegIndex, int hipsIndex, const AnimPose& targetFootPose) const;
-    glm::vec3 deflectHandFromTorso(const glm::vec3& handPosition, const FBXJointShapeInfo& hipsShapeInfo, const FBXJointShapeInfo& spineShapeInfo,
-                                   const FBXJointShapeInfo& spine1ShapeInfo, const FBXJointShapeInfo& spine2ShapeInfo) const;
+    glm::vec3 deflectHandFromTorso(const glm::vec3& handPosition, const HFMJointShapeInfo& hipsShapeInfo, const HFMJointShapeInfo& spineShapeInfo,
+                                   const HFMJointShapeInfo& spine1ShapeInfo, const HFMJointShapeInfo& spine2ShapeInfo) const;
 
 
     AnimPose _modelOffset;  // model to rig space
@@ -270,6 +301,7 @@ protected:
 
     // Only accessed by the main thread
     PoseSet _internalPoseSet;
+    PoseSet _networkPoseSet;
 
     // Copy of the _poseSet for external threads.
     PoseSet _externalPoseSet;
@@ -298,12 +330,16 @@ protected:
     glm::vec3 _lastForward;
     glm::vec3 _lastPosition;
     glm::vec3 _lastVelocity;
+    bool _isMovingWithMomentum{ false };
 
     QUrl _animGraphURL;
     std::shared_ptr<AnimNode> _animNode;
+    std::shared_ptr<AnimNode> _networkNode;
     std::shared_ptr<AnimSkeleton> _animSkeleton;
     std::unique_ptr<AnimNodeLoader> _animLoader;
+    std::unique_ptr<AnimNodeLoader> _networkLoader;
     AnimVariantMap _animVars;
+    AnimVariantMap _networkVars;
 
     enum class RigRole {
         Idle = 0,
@@ -311,11 +347,55 @@ protected:
         Move,
         Hover,
         Takeoff,
-        InAir
+        InAir,
+        Seated
     };
     RigRole _state { RigRole::Idle };
     RigRole _desiredState { RigRole::Idle };
     float _desiredStateAge { 0.0f };
+
+    struct NetworkAnimState {
+        enum ClipNodeEnum {
+            None = 0,
+            PreTransit,
+            Transit,
+            PostTransit,
+            A,
+            B
+        };
+        NetworkAnimState() : clipNodeEnum(NetworkAnimState::None), fps(30.0f), loop(false), firstFrame(0.0f), lastFrame(0.0f), blendTime(FLT_MAX) {}
+        NetworkAnimState(ClipNodeEnum clipNodeEnumIn, const QString& urlIn, float fpsIn, bool loopIn, float firstFrameIn, float lastFrameIn) :
+            clipNodeEnum(clipNodeEnumIn), url(urlIn), fps(fpsIn), loop(loopIn), firstFrame(firstFrameIn), lastFrame(lastFrameIn) {}
+
+        ClipNodeEnum clipNodeEnum;
+        QString url;
+        float fps;
+        bool loop;
+        float firstFrame;
+        float lastFrame;
+        float blendTime;
+    };
+
+    struct HandAnimState {
+        enum ClipNodeEnum {
+            None = 0,
+            A,
+            B
+        };
+
+        HandAnimState() : clipNodeEnum(HandAnimState::None) {}
+        HandAnimState(ClipNodeEnum clipNodeEnumIn, const QString& urlIn, float fpsIn, bool loopIn, float firstFrameIn, float lastFrameIn) :
+            clipNodeEnum(clipNodeEnumIn), url(urlIn), fps(fpsIn), loop(loopIn), firstFrame(firstFrameIn), lastFrame(lastFrameIn) {
+        }
+
+
+        ClipNodeEnum clipNodeEnum;
+        QString url;
+        float fps;
+        bool loop;
+        float firstFrame;
+        float lastFrame;
+    };
 
     struct UserAnimState {
         enum ClipNodeEnum {
@@ -350,10 +430,16 @@ protected:
     };
 
     UserAnimState _userAnimState;
+    NetworkAnimState _networkAnimState;
+    HandAnimState _rightHandAnimState;
+    HandAnimState _leftHandAnimState;
     std::map<QString, RoleAnimState> _roleAnimStates;
+    int _evaluationCount{ 0 };
 
     float _leftHandOverlayAlpha { 0.0f };
     float _rightHandOverlayAlpha { 0.0f };
+    float _talkIdleInterpTime { 0.0f };
+    bool _previousIsTalking { false };
 
     SimpleMovingAverage _averageForwardSpeed { 10 };
     SimpleMovingAverage _averageLateralSpeed { 10 };
@@ -381,19 +467,18 @@ protected:
     glm::vec3 _prevLeftFootPoleVector { Vectors::UNIT_Z }; // sensor space
     bool _prevLeftFootPoleVectorValid { false };
 
-    glm::vec3 _prevRightHandPoleVector{ -Vectors::UNIT_Z }; // sensor space
-    bool _prevRightHandPoleVectorValid{ false };
-
-    glm::vec3 _prevLeftHandPoleVector{ -Vectors::UNIT_Z }; // sensor space
-    bool _prevLeftHandPoleVectorValid{ false };
-
-    bool _smoothPoleVectors { false };
-
     int _rigId;
     bool _headEnabled { false };
+    bool _computeNetworkAnimation { false };
+    bool _sendNetworkNode { false };
 
     AnimContext _lastContext;
     AnimVariantMap _lastAnimVars;
+
+    SnapshotBlendPoseHelper _hipsBlendHelper;
+    ControllerParameters _previousControllerParameters;
+    Flow _internalFlow;
+    Flow _networkFlow;
 };
 
 #endif /* defined(__hifi__Rig__) */

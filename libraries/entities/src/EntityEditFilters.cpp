@@ -14,6 +14,7 @@
 #include <QUrl>
 
 #include <ResourceManager.h>
+#include <shared/ScriptInitializerMixin.h>
 
 QList<EntityItemID> EntityEditFilters::getZonesByPosition(glm::vec3& position) {
     QList<EntityItemID> zones;
@@ -42,7 +43,7 @@ QList<EntityItemID> EntityEditFilters::getZonesByPosition(glm::vec3& position) {
 }
 
 bool EntityEditFilters::filter(glm::vec3& position, EntityItemProperties& propertiesIn, EntityItemProperties& propertiesOut,
-        bool& wasChanged, EntityTree::FilterType filterType, EntityItemID& itemID, EntityItemPointer& existingEntity) {
+        bool& wasChanged, EntityTree::FilterType filterType, EntityItemID& itemID, const EntityItemPointer& existingEntity) {
     
     // get the ids of all the zones (plus the global entity edit filter) that the position
     // lies within
@@ -104,10 +105,10 @@ bool EntityEditFilters::filter(glm::vec3& position, EntityItemProperties& proper
                         AABox aaBox = zoneEntity->getAABox(success);
                         if (success) {
                             QScriptValue boundingBox = filterData.engine->newObject();
-                            QScriptValue bottomRightNear = vec3toScriptValue(filterData.engine, aaBox.getCorner());
-                            QScriptValue topFarLeft = vec3toScriptValue(filterData.engine, aaBox.calcTopFarLeft());
-                            QScriptValue center = vec3toScriptValue(filterData.engine, aaBox.calcCenter());
-                            QScriptValue boundingBoxDimensions = vec3toScriptValue(filterData.engine, aaBox.getDimensions());
+                            QScriptValue bottomRightNear = vec3ToScriptValue(filterData.engine, aaBox.getCorner());
+                            QScriptValue topFarLeft = vec3ToScriptValue(filterData.engine, aaBox.calcTopFarLeft());
+                            QScriptValue center = vec3ToScriptValue(filterData.engine, aaBox.calcCenter());
+                            QScriptValue boundingBoxDimensions = vec3ToScriptValue(filterData.engine, aaBox.getDimensions());
                             boundingBox.setProperty("brn", bottomRightNear);
                             boundingBox.setProperty("tfl", topFarLeft);
                             boundingBox.setProperty("center", center);
@@ -183,7 +184,7 @@ void EntityEditFilters::addFilter(EntityItemID entityID, QString filterURL) {
     }
    
     // The following should be abstracted out for use in Agent.cpp (and maybe later AvatarMixer.cpp)
-    if (scriptURL.scheme().isEmpty() || (scriptURL.scheme() == URL_SCHEME_FILE)) {
+    if (scriptURL.scheme().isEmpty() || (scriptURL.scheme() == HIFI_URL_SCHEME_FILE)) {
         qWarning() << "Cannot load script from local filesystem, because assignment may be on a different computer.";
         scriptRequestFinished(entityID);
         return;
@@ -200,16 +201,16 @@ void EntityEditFilters::addFilter(EntityItemID entityID, QString filterURL) {
     _filterDataMap.insert(entityID, filterData);
     _lock.unlock();
    
-    auto scriptRequest = DependencyManager::get<ResourceManager>()->createResourceRequest(this, scriptURL);
+    auto scriptRequest = DependencyManager::get<ResourceManager>()->createResourceRequest(
+        this, scriptURL, true, -1, "EntityEditFilters::addFilter");
     if (!scriptRequest) {
-        qWarning() << "Could not create ResourceRequest for Entity Edit filter script at" << scriptURL.toString();
+        qWarning() << "Could not create ResourceRequest for Entity Edit filter.";
         scriptRequestFinished(entityID);
         return;
     }
     // Agent.cpp sets up a timeout here, but that is unnecessary, as ResourceRequest has its own.
     connect(scriptRequest, &ResourceRequest::finished, this, [this, entityID]{ EntityEditFilters::scriptRequestFinished(entityID);} );
     // FIXME: handle atp rquests setup here. See Agent::requestScript()
-    qInfo() << "Requesting script at URL" << qPrintable(scriptRequest->getUrl().toString());
     scriptRequest->send();
     qDebug() << "script request sent for entity " << entityID;
 }
@@ -258,7 +259,13 @@ void EntityEditFilters::scriptRequestFinished(EntityItemID entityID) {
         if (hasCorrectSyntax(program)) {
             // create a QScriptEngine for this script
             QScriptEngine* engine = new QScriptEngine();
-            engine->evaluate(scriptContents);
+            engine->setObjectName("filter:" + entityID.toString());
+            engine->setProperty("type", "edit_filter");
+            engine->setProperty("fileName", urlString);
+            engine->setProperty("entityID", entityID);
+            engine->globalObject().setProperty("Script", engine->newQObject(engine));
+            DependencyManager::get<ScriptInitializers>()->runScriptInitializers(engine);
+            engine->evaluate(scriptContents, urlString);
             if (!hadUncaughtExceptions(*engine, urlString)) {
                 // put the engine in the engine map (so we don't leak them, etc...)
                 FilterData filterData;
@@ -375,7 +382,7 @@ void EntityEditFilters::scriptRequestFinished(EntityItemID entityID) {
         } 
     } else if (scriptRequest) {
         const QString urlString = scriptRequest->getUrl().toString();
-        qCritical() << "Failed to download script at" << urlString;
+        qCritical() << "Failed to download script";
         // See HTTPResourceRequest::onRequestFinished for interpretation of codes. For example, a 404 is code 6 and 403 is 3. A timeout is 2. Go figure.
         qCritical() << "ResourceRequest error was" << scriptRequest->getResult();
     } else {

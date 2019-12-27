@@ -10,16 +10,7 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
-/* global Script, Controller, RIGHT_HAND, LEFT_HAND, Mat4, MyAvatar, Vec3, Camera, Quat,
-   getGrabPointSphereOffset, getEnabledModuleByName, makeRunningValues, Entities,
-   enableDispatcherModule, disableDispatcherModule, entityIsDistanceGrabbable,
-   makeDispatcherModuleParameters, MSECS_PER_SEC, HAPTIC_PULSE_STRENGTH, HAPTIC_PULSE_DURATION,
-   PICK_MAX_DISTANCE, COLORS_GRAB_SEARCHING_HALF_SQUEEZE, COLORS_GRAB_SEARCHING_FULL_SQUEEZE, COLORS_GRAB_DISTANCE_HOLD,
-   DEFAULT_SEARCH_SPHERE_DISTANCE, TRIGGER_OFF_VALUE, TRIGGER_ON_VALUE, ZERO_VEC, ensureDynamic,
-   getControllerWorldLocation, projectOntoEntityXYPlane, ContextOverlay, HMD, Reticle, Overlays, isPointingAtUI,
-   makeLaserParams
-
-*/
+/* global Script, Controller, RIGHT_HAND, LEFT_HAND, HMD, makeLaserParams */
 (function() {
     Script.include("/~/system/libraries/controllers.js");
     var ControllerDispatcherUtils = Script.require("/~/system/libraries/controllerDispatcherUtils.js");
@@ -33,11 +24,25 @@
         this.reticleMinY = MARGIN;
         this.reticleMaxY;
         this.parameters = ControllerDispatcherUtils.makeDispatcherModuleParameters(
-            540,
+            160, // Same as webSurfaceLaserInput.
             this.hand === RIGHT_HAND ? ["rightHand"] : ["leftHand"],
             [],
             100,
             makeLaserParams((this.hand + HUD_LASER_OFFSET), false));
+
+        this.getFarGrab = function () {
+            return getEnabledModuleByName(this.hand === RIGHT_HAND ? ("RightFarGrabEntity") : ("LeftFarGrabEntity"));
+        }
+
+        this.farGrabActive = function () {
+            var farGrab = this.getFarGrab();
+            // farGrab will be null if module isn't loaded.
+            if (farGrab) {
+                return farGrab.targetIsNull();
+            } else {
+                return false;
+            }
+        };
 
         this.getOtherHandController = function() {
             return (this.hand === RIGHT_HAND) ? Controller.Standard.LeftHand : Controller.Standard.RightHand;
@@ -72,7 +77,6 @@
 
         this.processLaser = function(controllerData) {
             var controllerLocation = controllerData.controllerLocations[this.hand];
-            var otherModuleRunning = this.getOtherModule().running;
             if ((controllerData.triggerValues[this.hand] < ControllerDispatcherUtils.TRIGGER_ON_VALUE || !controllerLocation.valid) ||
                 this.pointingAtTablet(controllerData)) {
                 return false;
@@ -89,7 +93,7 @@
 
         this.isReady = function (controllerData) {
             var otherModuleRunning = this.getOtherModule().running;
-            if (!otherModuleRunning && HMD.active) {
+            if (!otherModuleRunning && HMD.active && !this.farGrabActive()) {
                 if (this.processLaser(controllerData)) {
                     this.running = true;
                     return ControllerDispatcherUtils.makeRunningValues(true, [], []);

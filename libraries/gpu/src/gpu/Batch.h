@@ -89,14 +89,14 @@ public:
     void captureDrawCallInfo();
     void captureNamedDrawCallInfo(std::string name);
 
-    Batch(const char* name = nullptr);
+    Batch(const std::string& name = "");
     // Disallow copy construction and assignement of batches
     Batch(const Batch& batch) = delete;
     Batch& operator=(const Batch& batch) = delete;
     ~Batch();
 
-    void setName(const char* name);
-    const char* getName() const { return _name; }
+    void setName(const std::string& name);
+    const std::string& getName() const { return _name; }
     void clear();
 
     // Batches may need to override the context level stereo settings
@@ -226,6 +226,8 @@ public:
 
     // Generate the mips for a texture
     void generateTextureMips(const TexturePointer& texture);
+    // Generate the mips for a texture using the current pipeline
+    void generateTextureMipsWithPipeline(const TexturePointer& destTexture, int numMips = -1);
 
     // Query Section
     void beginQuery(const QueryPointer& query);
@@ -326,6 +328,7 @@ public:
         COMMAND_clearFramebuffer,
         COMMAND_blit,
         COMMAND_generateTextureMips,
+        COMMAND_generateTextureMipsWithPipeline,
 
         COMMAND_advance,
 
@@ -437,6 +440,18 @@ public:
         };
     };
 
+    using CommandHandler = std::function<void(Command, const Param*)>;
+
+    void forEachCommand(const CommandHandler& handler) const {
+        size_t count = _commands.size();
+        for (size_t i = 0; i < count; ++i) {
+            const auto command = _commands[i];
+            const auto offset = _commandOffsets[i];
+            const Param* params = _params.data() + offset;
+            handler(command, params);
+        }
+    }
+
     typedef Cache<BufferPointer>::Vector BufferCaches;
     typedef Cache<TexturePointer>::Vector TextureCaches;
     typedef Cache<TextureTablePointer>::Vector TextureTableCaches;
@@ -516,7 +531,7 @@ public:
     bool _enableSkybox { false };
 
 protected:
-    const char* _name;
+    std::string _name;
 
     friend class Context;
     friend class Frame;

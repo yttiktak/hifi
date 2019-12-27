@@ -15,7 +15,6 @@
 #include <shaders/Shaders.h>
 
 #include <render/BlurTask.h>
-#include <render/ResampleTask.h>
 #include "render-utils/ShaderConstants.h"
 
 #define BLOOM_BLUR_LEVEL_COUNT  3
@@ -35,7 +34,17 @@ void BloomThreshold::run(const render::RenderContextPointer& renderContext, cons
 
     const auto frameTransform = inputs.get0();
     const auto inputFrameBuffer = inputs.get1();
-    const auto bloom = inputs.get2();
+    const auto bloomFrame = inputs.get2();
+    const auto lightingModel = inputs.get3();
+    const auto& bloomStage = renderContext->_scene->getStage<BloomStage>();
+    graphics::BloomPointer bloom;
+    if (bloomStage && bloomFrame->_blooms.size()) {
+        bloom = bloomStage->getBloom(bloomFrame->_blooms.front());
+    }
+    if (!bloom || (lightingModel && !lightingModel->isBloomEnabled())) {
+        renderContext->taskFlow.abortTask();
+        return;
+    }
 
     assert(inputFrameBuffer->hasColor());
 
@@ -65,11 +74,6 @@ void BloomThreshold::run(const render::RenderContextPointer& renderContext, cons
 
     glm::ivec4 viewport{ 0, 0, bufferSize.x, bufferSize.y };
 
-    if (!bloom) {
-        renderContext->taskFlow.abortTask();
-        return;
-    }
-
     _parameters.edit()._threshold = bloom->getBloomThreshold();
 
     gpu::doInBatch("BloomThreshold::run", args->_context, [&](gpu::Batch& batch) {
@@ -89,6 +93,7 @@ void BloomThreshold::run(const render::RenderContextPointer& renderContext, cons
 
     outputs.edit0() = _outputBuffer;
     outputs.edit1() = 0.5f + bloom->getBloomSize() * 3.5f;
+    outputs.edit2() = bloom;
 }
 
 BloomApply::BloomApply() {
@@ -183,12 +188,17 @@ void BloomDraw::run(const render::RenderContextPointer& renderContext, const Inp
     }
 }
 
+void DebugBloomConfig::setMode(int mode) {
+    _mode = std::min((int)DebugBloomConfig::MODE_COUNT, std::max(0, mode));
+    emit dirty();
+}
+
 DebugBloom::DebugBloom() {
     _params = std::make_shared<gpu::Buffer>(sizeof(glm::vec4), nullptr);
 }
 
 void DebugBloom::configure(const Config& config) {
-    _mode = static_cast<DebugBloomConfig::Mode>(config.mode);
+    _mode = (DebugBloomConfig::Mode) config.getMode();
     assert(_mode < DebugBloomConfig::MODE_COUNT);
 }
 
@@ -196,6 +206,10 @@ void DebugBloom::run(const render::RenderContextPointer& renderContext, const In
     assert(renderContext->args);
     assert(renderContext->args->hasViewFrustum());
     RenderArgs* args = renderContext->args;
+
+    if (_mode == DebugBloomConfig::OFF) {
+        return;
+    }
 
     const auto frameBuffer = inputs.get0();
     const auto combinedBlurBuffer = inputs.get4();
@@ -277,7 +291,7 @@ void BloomEffect::configure(const Config& config) {
     for (auto i = 0; i < BLOOM_BLUR_LEVEL_COUNT; i++) {
         blurName.back() = '0' + i;
         auto blurConfig = config.getConfig<render::BlurGaussian>(blurName);
-        blurConfig->setProperty("filterScale", 1.0f);
+        blurConfig->filterScale = 1.0f;
     }
 }
 
@@ -296,9 +310,9 @@ void BloomEffect::build(JobModel& task, const render::Varying& inputs, render::V
     const auto blurFB2 = task.addJob<render::BlurGaussian>("BloomBlur2", blurInput2);
 
     const auto& frameBuffer = inputs.getN<Inputs>(1);
-    const auto& bloom = inputs.getN<Inputs>(2);
 
     // Mix all blur levels at quarter resolution
+    const auto bloom = bloomOutputs.getN<BloomThreshold::Outputs>(2);
     const auto applyInput = BloomApply::Inputs(blurInputBuffer, blurFB0, blurFB1, blurFB2, bloom).asVarying();
     task.addJob<BloomApply>("BloomApply", applyInput);
     // And then blend result in additive manner on top of final color buffer

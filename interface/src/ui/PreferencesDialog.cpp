@@ -10,13 +10,13 @@
 
 #include <AudioClient.h>
 #include <avatar/AvatarManager.h>
-#include <devices/DdeFaceTracker.h>
 #include <ScriptEngines.h>
 #include <OffscreenUi.h>
 #include <Preferences.h>
-#include <RenderShadowTask.h>
+#include <plugins/PluginUtils.h>
 #include <display-plugins/CompositorHelper.h>
-
+#include <display-plugins/hmd/HmdDisplayPlugin.h>
+#include "scripting/RenderScriptingInterface.h"
 #include "Application.h"
 #include "DialogsManager.h"
 #include "LODManager.h"
@@ -24,6 +24,7 @@
 #include "Snapshot.h"
 #include "SnapshotAnimated.h"
 #include "UserActivityLogger.h"
+#include "ui/Keyboard.h"
 
 void setupPreferences() {
     auto preferences = DependencyManager::get<Preferences>();
@@ -56,18 +57,19 @@ void setupPreferences() {
     static const QString GRAPHICS_QUALITY { "Graphics Quality" };
     {
         auto getter = []()->float {
-            return DependencyManager::get<LODManager>()->getWorldDetailQuality();
+            return (int)DependencyManager::get<LODManager>()->getWorldDetailQuality();
         };
 
-        auto setter = [](float value) {
-            DependencyManager::get<LODManager>()->setWorldDetailQuality(value);
+        auto setter = [](int value) {
+            DependencyManager::get<LODManager>()->setWorldDetailQuality(static_cast<WorldDetailQuality>(value));
         };
 
-        auto wodSlider = new SliderPreference(GRAPHICS_QUALITY, "World Detail", getter, setter);
-        wodSlider->setMin(0.25f);
-        wodSlider->setMax(0.75f);
-        wodSlider->setStep(0.25f);
-        preferences->addPreference(wodSlider);
+        auto wodButtons = new RadioButtonsPreference(GRAPHICS_QUALITY, "World Detail", getter, setter);
+        QStringList items;
+        items << "Low World Detail" << "Medium World Detail" << "High World Detail";
+        wodButtons->setHeading("World Detail");
+        wodButtons->setItems(items);
+        preferences->addPreference(wodButtons);
 
         auto getterShadow = []()->bool {
             auto menu = Menu::getInstance();
@@ -80,12 +82,66 @@ void setupPreferences() {
         preferences->addPreference(new CheckPreference(GRAPHICS_QUALITY, "Show Shadows", getterShadow, setterShadow));
     }
 
+    {
+        auto getter = []()->QString {
+            RefreshRateManager::RefreshRateProfile refreshRateProfile = qApp->getRefreshRateManager().getRefreshRateProfile();
+            return QString::fromStdString(RefreshRateManager::refreshRateProfileToString(refreshRateProfile));
+        };
+
+        auto setter = [](QString value) {
+            std::string profileName = value.toStdString();
+            RefreshRateManager::RefreshRateProfile refreshRateProfile = RefreshRateManager::refreshRateProfileFromString(profileName);
+            qApp->getRefreshRateManager().setRefreshRateProfile(refreshRateProfile);
+        };
+
+        auto preference = new ComboBoxPreference(GRAPHICS_QUALITY, "Refresh Rate", getter, setter);
+        QStringList refreshRateProfiles
+            { QString::fromStdString(RefreshRateManager::refreshRateProfileToString(RefreshRateManager::RefreshRateProfile::ECO)),
+              QString::fromStdString(RefreshRateManager::refreshRateProfileToString(RefreshRateManager::RefreshRateProfile::INTERACTIVE)),
+              QString::fromStdString(RefreshRateManager::refreshRateProfileToString(RefreshRateManager::RefreshRateProfile::REALTIME)) };
+
+        preference->setItems(refreshRateProfiles);
+        preferences->addPreference(preference);
+
+        auto getterMaterialProceduralShaders = []() -> bool {
+            auto menu = Menu::getInstance();
+            return menu->isOptionChecked(MenuOption::MaterialProceduralShaders);
+        };
+        auto setterMaterialProceduralShaders = [](bool value) {
+            auto menu = Menu::getInstance();
+            menu->setIsOptionChecked(MenuOption::MaterialProceduralShaders, value);
+        };
+        preferences->addPreference(new CheckPreference(GRAPHICS_QUALITY, "Enable Procedural Materials", getterMaterialProceduralShaders, setterMaterialProceduralShaders));
+    }
+    {
+        // Expose the Viewport Resolution Scale
+        auto getter = []()->float {
+            return RenderScriptingInterface::getInstance()->getViewportResolutionScale();
+        };
+
+        auto setter = [](float value) {
+            RenderScriptingInterface::getInstance()->setViewportResolutionScale(value);
+        };
+
+        auto scaleSlider = new SliderPreference(GRAPHICS_QUALITY, "Resolution Scale", getter, setter);
+        scaleSlider->setMin(0.25f);
+        scaleSlider->setMax(1.0f);
+        scaleSlider->setStep(0.02f);
+        preferences->addPreference(scaleSlider);
+    }
+
     // UI
     static const QString UI_CATEGORY { "User Interface" };
     {
         auto getter = []()->bool { return qApp->getSettingConstrainToolbarPosition(); };
         auto setter = [](bool value) { qApp->setSettingConstrainToolbarPosition(value); };
         preferences->addPreference(new CheckPreference(UI_CATEGORY, "Constrain Toolbar Position to Horizontal Center", getter, setter));
+    }
+
+    {
+        auto getter = []()->bool { return qApp->getAwayStateWhenFocusLostInVREnabled(); };
+        auto setter = [](bool value) { qApp->setAwayStateWhenFocusLostInVREnabled(value); };
+        preferences->addPreference(new CheckPreference(UI_CATEGORY, "Go into away state when interface window loses focus in VR", getter, setter));
     }
 
     {
@@ -107,16 +163,45 @@ void setupPreferences() {
     }
 
     {
-        auto getter = []()->bool { return qApp->getPreferStylusOverLaser(); };
-        auto setter = [](bool value) { qApp->setPreferStylusOverLaser(value); };
-        preferences->addPreference(new CheckPreference(UI_CATEGORY, "Prefer Stylus Over Laser", getter, setter));
-    }
-
-    {
         static const QString RETICLE_ICON_NAME = { Cursor::Manager::getIconName(Cursor::Icon::RETICLE) };
         auto getter = []()->bool { return qApp->getPreferredCursor() == RETICLE_ICON_NAME; };
         auto setter = [](bool value) { qApp->setPreferredCursor(value ? RETICLE_ICON_NAME : QString()); };
         preferences->addPreference(new CheckPreference(UI_CATEGORY, "Use reticle cursor instead of arrow", getter, setter));
+    }
+
+    {
+        auto getter = []()->bool { return qApp->getMiniTabletEnabled(); };
+        auto setter = [](bool value) { qApp->setMiniTabletEnabled(value); };
+        preferences->addPreference(new CheckPreference(UI_CATEGORY, "Use mini tablet", getter, setter));
+    }
+
+    {
+        auto getter = []()->int { return DependencyManager::get<Keyboard>()->getUse3DKeyboard(); };
+        auto setter = [](int value) { DependencyManager::get<Keyboard>()->setUse3DKeyboard(value); };
+        preferences->addPreference(new CheckPreference(UI_CATEGORY, "Use Virtual Keyboard", getter, setter));
+    }
+
+    {
+        auto getter = []()->bool { return DependencyManager::get<Keyboard>()->getPreferMalletsOverLasers() ? 1 : 0; };
+        auto setter = [](bool value) { return DependencyManager::get<Keyboard>()->setPreferMalletsOverLasers((bool)value); };
+        auto preference = new RadioButtonsPreference(UI_CATEGORY, "Keyboard laser / mallets", getter, setter);
+        QStringList items;
+        items << "Lasers" << "Mallets";
+        preference->setItems(items);
+        preference->setIndented(true);
+        preferences->addPreference(preference);
+    }
+
+
+    {
+        auto getter = []()->int { return qApp->getPreferStylusOverLaser() ? 1 : 0; };
+        auto setter = [](int value) { qApp->setPreferStylusOverLaser((bool)value); };
+        auto preference = new RadioButtonsPreference(UI_CATEGORY, "Tablet stylys / laser", getter, setter);
+        QStringList items;
+        items << "Lasers" << "Stylus";
+        preference->setHeading("Tablet Input Mechanism");
+        preference->setItems(items);
+        preferences->addPreference(preference);
     }
 
     static const QString VIEW_CATEGORY{ "View" };
@@ -138,15 +223,13 @@ void setupPreferences() {
         preferences->addPreference(preference);
     }
 
-
-    // FIXME: Remove setting completely or make available through JavaScript API?
     /*
+    // FIXME: Remove setting completely or make available through JavaScript API?
     {
         auto getter = []()->bool { return qApp->getPreferAvatarFingerOverStylus(); };
         auto setter = [](bool value) { qApp->setPreferAvatarFingerOverStylus(value); };
         preferences->addPreference(new CheckPreference(UI_CATEGORY, "Prefer Avatar Finger Over Stylus", getter, setter));
-    }
-    */
+        }*/
 
     // Snapshots
     static const QString SNAPSHOTS { "Snapshots" };
@@ -174,7 +257,7 @@ void setupPreferences() {
                                 "installation and system details, and crash events. By allowing High Fidelity to collect "
                                 "this information you are helping to improve the product. ", getter, setter));
     }
-    
+
     static const QString AVATAR_TUNING { "Avatar Tuning" };
     {
         auto getter = [myAvatar]()->QString { return myAvatar->getDominantHand(); };
@@ -190,8 +273,8 @@ void setupPreferences() {
         preference->setStep(0.05f);
         preference->setDecimals(2);
         preferences->addPreference(preference);
-        
-        // When the Interface is first loaded, this section setupPreferences(); is loaded - 
+
+        // When the Interface is first loaded, this section setupPreferences(); is loaded -
         // causing the myAvatar->getDomainMinScale() and myAvatar->getDomainMaxScale() to get set to incorrect values
         // which can't be changed across domain switches. Having these values loaded up when you load the Dialog each time
         // is a way around this, therefore they're not specified here but in the QML.
@@ -212,29 +295,23 @@ void setupPreferences() {
         preferences->addPreference(preference);
     }
 
-    static const QString FACE_TRACKING{ "Face Tracking" };
-    {
-        auto getter = []()->float { return DependencyManager::get<DdeFaceTracker>()->getEyeClosingThreshold(); };
-        auto setter = [](float value) { DependencyManager::get<DdeFaceTracker>()->setEyeClosingThreshold(value); };
-        preferences->addPreference(new SliderPreference(FACE_TRACKING, "Eye Closing Threshold", getter, setter));
-    }
-    {
-        auto getter = []()->float { return FaceTracker::getEyeDeflection(); };
-        auto setter = [](float value) { FaceTracker::setEyeDeflection(value); };
-        preferences->addPreference(new SliderPreference(FACE_TRACKING, "Eye Deflection", getter, setter));
-    }
-
     static const QString VR_MOVEMENT{ "VR Movement" };
     {
-        auto getter = [myAvatar]()->int { return myAvatar->useAdvancedMovementControls() ? 1 : 0; };
-        auto setter = [myAvatar](int value) { myAvatar->setUseAdvancedMovementControls(value == 1); };
-        auto preference = 
-            new RadioButtonsPreference(VR_MOVEMENT, "Teleporting only / Walking and teleporting", getter, setter);
-        QStringList items;
-        items << "Teleporting only" << "Walking and teleporting";
-        preference->setHeading("Movement mode");
-        preference->setItems(items);
+        auto getter = [myAvatar]()->bool { return myAvatar->getAllowTeleporting(); };
+        auto setter = [myAvatar](bool value) { myAvatar->setAllowTeleporting(value); };
+        auto preference = new CheckPreference(VR_MOVEMENT, "Teleporting", getter, setter);
         preferences->addPreference(preference);
+    }
+    {
+        auto getter = [myAvatar]()->bool { return myAvatar->useAdvancedMovementControls(); };
+        auto setter = [myAvatar](bool value) { myAvatar->setUseAdvancedMovementControls(value); };
+        auto preference = new CheckPreference(VR_MOVEMENT, "Walking", getter, setter);
+        preferences->addPreference(preference);
+    }
+    {
+        auto getter = [myAvatar]()->bool { return myAvatar->getStrafeEnabled(); };
+        auto setter = [myAvatar](bool value) { myAvatar->setStrafeEnabled(value); };
+        preferences->addPreference(new CheckPreference(VR_MOVEMENT, "Strafing", getter, setter));
     }
     {
         auto getter = [myAvatar]()->bool { return myAvatar->getFlyingHMDPref(); };
@@ -242,6 +319,28 @@ void setupPreferences() {
         auto preference = new CheckPreference(VR_MOVEMENT, "Jumping and flying", getter, setter);
         preference->setIndented(true);
         preferences->addPreference(preference);
+    }
+    {
+        auto getter = [myAvatar]()->bool { return myAvatar->hoverWhenUnsupported(); };
+        auto setter = [myAvatar](bool value) { myAvatar->setHoverWhenUnsupported(value); };
+        auto preference = new CheckPreference(VR_MOVEMENT, "Hover When Unsupported", getter, setter);
+        preferences->addPreference(preference);
+    }
+    {
+        auto getter = [myAvatar]()->int { return myAvatar->getMovementReference(); };
+        auto setter = [myAvatar](int value) { myAvatar->setMovementReference(value); };
+        //auto preference = new CheckPreference(VR_MOVEMENT, "Hand-Relative Movement", getter, setter);
+        auto preference = new RadioButtonsPreference(VR_MOVEMENT, "Movement Direction", getter, setter);
+        QStringList items;
+        items << "HMD-Relative" << "Hand-Relative" << "Hand-Relative (Leveled)";
+        preference->setHeading("Movement Direction");
+        preference->setItems(items);
+        preferences->addPreference(preference);
+    }
+    {
+        auto getter = [myAvatar]()->QString { return myAvatar->getDominantHand(); };
+        auto setter = [myAvatar](const QString& value) { myAvatar->setDominantHand(value); };
+        preferences->addPreference(new PrimaryHandPreference(VR_MOVEMENT, "Dominant Hand", getter, setter));
     }
     {
         auto getter = [myAvatar]()->int { return myAvatar->getSnapTurn() ? 0 : 1; };
@@ -254,9 +353,94 @@ void setupPreferences() {
         preferences->addPreference(preference);
     }
     {
+        auto getter = [myAvatar]()->int { return myAvatar->getControlScheme(); };
+        auto setter = [myAvatar](int index) { myAvatar->setControlScheme(index); };
+        auto preference = new RadioButtonsPreference(VR_MOVEMENT, "Control Scheme", getter, setter);
+        QStringList items;
+        items << "Default" << "Analog" << "Analog++";
+        preference->setHeading("Control Scheme Selection");
+        preference->setItems(items);
+        preferences->addPreference(preference);
+    }
+    {
+        auto getter = [myAvatar]()->float { return myAvatar->getAnalogPlusWalkSpeed(); };
+        auto setter = [myAvatar](float value) { myAvatar->setAnalogPlusWalkSpeed(value); };
+        auto preference = new SpinnerSliderPreference(VR_MOVEMENT, "Analog++ Walk Speed", getter, setter);
+        preference->setMin(6.0f);
+        preference->setMax(30.0f);
+        preference->setStep(1);
+        preference->setDecimals(2);
+        preferences->addPreference(preference);
+    }
+    {
+        auto getter = []()->bool {
+            return qApp->getVisionSqueeze().getVisionSqueezeEnabled();
+        };
+        auto setter = [](bool value) {
+            qApp->getVisionSqueeze().setVisionSqueezeEnabled(value);
+        };
+        auto preference = new CheckPreference(VR_MOVEMENT, "Enable HMD Comfort Mode", getter, setter);
+        preferences->addPreference(preference);
+    }
+    {
+        const float sliderPositions = 5.0f;
+        auto getter = [sliderPositions]()->float {
+            return roundf(sliderPositions * qApp->getVisionSqueeze().getVisionSqueezeRatioX());
+        };
+        auto setter = [sliderPositions](float value) {
+            float ratio = value / sliderPositions;
+            qApp->getVisionSqueeze().setVisionSqueezeRatioX(ratio);
+            qApp->getVisionSqueeze().setVisionSqueezeRatioY(ratio);
+        };
+        auto preference = new SpinnerSliderPreference(VR_MOVEMENT, "Comfort Mode", getter, setter);
+        preference->setMin(0.0f);
+        preference->setMax(sliderPositions);
+        preference->setStep(1.0f);
+        preference->setDecimals(0);
+        preferences->addPreference(preference);
+    }
+    {
         auto getter = [myAvatar]()->bool { return myAvatar->getShowPlayArea(); };
         auto setter = [myAvatar](bool value) { myAvatar->setShowPlayArea(value); };
         auto preference = new CheckPreference(VR_MOVEMENT, "Show room boundaries while teleporting", getter, setter);
+        preferences->addPreference(preference);
+    }
+    {
+        auto getter = [myAvatar]()->int {
+            switch (myAvatar->getUserRecenterModel()) {
+                case MyAvatar::SitStandModelType::Auto:
+                    default:
+                    return 0;
+                case MyAvatar::SitStandModelType::ForceSit:
+                    return 1;
+                case MyAvatar::SitStandModelType::ForceStand:
+                    return 2;
+                case MyAvatar::SitStandModelType::DisableHMDLean:
+                    return 3;
+            }
+        };
+        auto setter = [myAvatar](int value) {
+            switch (value) {
+                case 0:
+                default:
+                    myAvatar->setUserRecenterModel(MyAvatar::SitStandModelType::Auto);
+                    break;
+                case 1:
+                    myAvatar->setUserRecenterModel(MyAvatar::SitStandModelType::ForceSit);
+                    break;
+                case 2:
+                    myAvatar->setUserRecenterModel(MyAvatar::SitStandModelType::ForceStand);
+                    break;
+                case 3:
+                    myAvatar->setUserRecenterModel(MyAvatar::SitStandModelType::DisableHMDLean);
+                    break;
+            }
+        };
+        auto preference = new RadioButtonsPreference(VR_MOVEMENT, "Auto / Force Sit / Force Stand / Disable Recenter", getter, setter);
+        QStringList items;
+        items << "Auto - turns on avatar leaning when standing in real world" << "Seated - disables all avatar leaning while sitting in real world" << "Standing - enables avatar leaning while sitting in real world" << "Disabled - allows avatar sitting on the floor [Experimental]";
+        preference->setHeading("Avatar leaning behavior");
+        preference->setItems(items);
         preferences->addPreference(preference);
     }
     {
@@ -377,6 +561,5 @@ void setupPreferences() {
             preference->setStep(10);
             preferences->addPreference(preference);
         }
-
     }
 }

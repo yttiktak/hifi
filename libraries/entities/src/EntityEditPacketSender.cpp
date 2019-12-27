@@ -39,13 +39,10 @@ void EntityEditPacketSender::adjustEditPacketForClockSkew(PacketType type, QByte
     }
 }
 
-void EntityEditPacketSender::queueEditAvatarEntityMessage(PacketType type,
-                                                          EntityTreePointer entityTree,
-                                                          EntityItemID entityItemID,
-                                                          const EntityItemProperties& properties) {
+void EntityEditPacketSender::queueEditAvatarEntityMessage(EntityTreePointer entityTree, EntityItemID entityItemID) {
     assert(_myAvatar);
     if (!entityTree) {
-        qCDebug(entities) << "EntityEditPacketSender::queueEditEntityMessage null entityTree.";
+        qCDebug(entities) << "EntityEditPacketSender::queueEditAvatarEntityMessage null entityTree.";
         return;
     }
     EntityItemPointer entity = entityTree->findEntityByEntityItemID(entityItemID);
@@ -53,46 +50,42 @@ void EntityEditPacketSender::queueEditAvatarEntityMessage(PacketType type,
         qCDebug(entities) << "EntityEditPacketSender::queueEditAvatarEntityMessage can't find entity: " << entityItemID;
         return;
     }
-
-    // the properties that get serialized into the avatar identity packet should be the entire set
-    // rather than just the ones being edited.
-    EntityItemProperties entityProperties = entity->getProperties();
-    entityProperties.merge(properties);
-
-    std::lock_guard<std::mutex> lock(_mutex);
-    QScriptValue scriptProperties = EntityItemNonDefaultPropertiesToScriptValue(&_scriptEngine, entityProperties);
-    QVariant variantProperties = scriptProperties.toVariant();
-    QJsonDocument jsonProperties = QJsonDocument::fromVariant(variantProperties);
-
-    // the ID of the parent/avatar changes from session to session.  use a special UUID to indicate the avatar
-    QJsonObject jsonObject = jsonProperties.object();
-    if (jsonObject.contains("parentID")) {
-        if (QUuid(jsonObject["parentID"].toString()) == _myAvatar->getID()) {
-            jsonObject["parentID"] = AVATAR_SELF_ID.toString();
-        }
-    }
-    jsonProperties = QJsonDocument(jsonObject);
-
-    QByteArray binaryProperties = jsonProperties.toBinaryData();
-    _myAvatar->updateAvatarEntity(entityItemID, binaryProperties);
-
     entity->setLastBroadcast(usecTimestampNow());
-}
 
+    OctreePacketData packetData(false, AvatarTraits::MAXIMUM_TRAIT_SIZE);
+    EncodeBitstreamParams params;
+    EntityTreeElementExtraEncodeDataPointer extra { nullptr };
+    OctreeElement::AppendState appendState = entity->appendEntityData(&packetData, params, extra);
+
+    if (appendState != OctreeElement::COMPLETED) {
+        // this entity's payload is too big
+        return;
+    }
+
+    QByteArray tempArray((const char*)packetData.getUncompressedData(), packetData.getUncompressedSize());
+    _myAvatar->storeAvatarEntityDataPayload(entityItemID, tempArray);
+}
 
 void EntityEditPacketSender::queueEditEntityMessage(PacketType type,
                                                     EntityTreePointer entityTree,
                                                     EntityItemID entityItemID,
                                                     const EntityItemProperties& properties) {
-    if (properties.getClientOnly()) {
+    if (properties.getEntityHostType() == entity::HostType::AVATAR) {
         if (!_myAvatar) {
-            qCWarning(entities) << "Suppressing entity edit message: cannot send clientOnly edit with no myAvatar";
-        } else if (properties.getOwningAvatarID() == _myAvatar->getID()) {
-            // this is an avatar-based entity --> update our avatar-data rather than sending to the entity-server
-            queueEditAvatarEntityMessage(type, entityTree, entityItemID, properties);
+            qCWarning(entities) << "Suppressing entity edit message: cannot send avatar entity edit with no myAvatar";
+        } else if (properties.getOwningAvatarID() == _myAvatar->getID() || properties.getOwningAvatarID() == AVATAR_SELF_ID) {
+            // this is a local avatar-entity --> update our avatar-data rather than sending to the entity-server
+            // Note: we store AVATAR_SELF_ID in EntityItem::_owningAvatarID and we usually
+            // store the actual sessionUUID in EntityItemProperties::_owningAvatarID.
+            // However at this context we check for both cases just in case.  Really we just want to know
+            // where to route the data: entity-server or avatar-mixer.
+            queueEditAvatarEntityMessage(entityTree, entityItemID);
         } else {
-            qCWarning(entities) << "Suppressing entity edit message: cannot send clientOnly edit for another avatar";
+            qCWarning(entities) << "Suppressing entity edit message: cannot send avatar entity edit for another avatar";
         }
+        return;
+    } else if (properties.getEntityHostType() == entity::HostType::LOCAL) {
+        // Don't send edits for local entities
         return;
     }
 
@@ -121,10 +114,20 @@ void EntityEditPacketSender::queueEditEntityMessage(PacketType type,
 
     EntityPropertyFlags requestedProperties = propertiesCopy.getChangedProperties();
 
+    if (!nodeList->getThisNodeCanGetAndSetPrivateUserData() && requestedProperties.getHasProperty(PROP_PRIVATE_USER_DATA)) {
+        requestedProperties -= PROP_PRIVATE_USER_DATA;
+    }
+
     while (encodeResult == OctreeElement::PARTIAL) {
         encodeResult = EntityItemProperties::encodeEntityEditPacket(type, entityItemID, propertiesCopy, bufferOut, requestedProperties, didntFitProperties);
 
-        if (encodeResult != OctreeElement::NONE) {
+        if (encodeResult == OctreeElement::NONE) {
+            // This can happen for two reasons:
+            // 1. One of the properties is too large to fit in a single packet.
+            // 2. The requested properties don't exist in this entity type (e.g., 'modelUrl' in a Zone Entity).
+            // Since case #1 is more likely (and more critical), that's the one we warn about.
+            qCWarning(entities).nospace() << "queueEditEntityMessage: some of the properties don't fit and can't be sent. entityID=" << uuidStringWithoutCurlyBraces(entityItemID);
+        } else {
             #ifdef WANT_DEBUG
                 qCDebug(entities) << "calling queueOctreeEditMessage()...";
                 qCDebug(entities) << "    id:" << entityItemID;

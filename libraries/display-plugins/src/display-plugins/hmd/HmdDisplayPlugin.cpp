@@ -68,6 +68,16 @@ glm::mat4 HmdDisplayPlugin::getCullingProjection(const glm::mat4& baseProjection
     return _cullingProjection; 
 }
 
+glm::ivec4 HmdDisplayPlugin::eyeViewport(Eye eye) const {
+    uvec2 vpSize = getRecommendedRenderSize();
+    vpSize.x /= 2;
+    uvec2 vpPos;
+    if (eye == Eye::Right) {
+        vpPos.x = vpSize.x;
+    }
+    return ivec4(vpPos, vpSize);
+}
+
 #define DISABLE_PREVIEW_MENU_ITEM_DELAY_MS 500
 
 bool HmdDisplayPlugin::internalActivate() {
@@ -113,6 +123,11 @@ void HmdDisplayPlugin::internalDeactivate() {
 }
 
 void HmdDisplayPlugin::customizeContext() {
+
+    VisionSqueezeParameters parameters;
+    _visionSqueezeParametersBuffer =
+        gpu::BufferView(std::make_shared<gpu::Buffer>(sizeof(VisionSqueezeParameters), (const gpu::Byte*) &parameters));
+
     Parent::customizeContext();
     _hudRenderer.build();
 }
@@ -199,7 +214,7 @@ void HmdDisplayPlugin::internalPresent() {
         float newWidth = sourceSize.x - shiftLeftBy;
 
         // Experimentally adjusted the region presented in preview to avoid seeing the masked pixels and recenter the center...
-        static float SCALE_WIDTH = 0.9f;
+        static float SCALE_WIDTH = 0.8f;
         static float SCALE_OFFSET = 2.0f;
         newWidth *= SCALE_WIDTH;
         shiftLeftBy *= SCALE_OFFSET;
@@ -275,7 +290,7 @@ void HmdDisplayPlugin::internalPresent() {
             _previewTexture->setSource("HMD Preview Texture");
             _previewTexture->setUsage(gpu::Texture::Usage::Builder().withColor().build());
             _previewTexture->setStoredMipFormat(gpu::Element(gpu::VEC4, gpu::NUINT8, gpu::RGBA));
-            _previewTexture->assignStoredMip(0, image.byteCount(), image.constBits());
+            _previewTexture->assignStoredMip(0, image.sizeInBytes(), image.constBits());
             _previewTexture->setAutoGenerateMips(true);
 
         auto viewport = getViewportForSourceSize(uvec2(_previewTexture->getDimensions()));
@@ -402,46 +417,44 @@ void HmdDisplayPlugin::HUDRenderer::build() {
     format->setAttribute(gpu::Stream::POSITION, gpu::Stream::POSITION, gpu::Element(gpu::VEC3, gpu::FLOAT, gpu::XYZ), 0);
     format->setAttribute(gpu::Stream::TEXCOORD, gpu::Stream::TEXCOORD, gpu::Element(gpu::VEC2, gpu::FLOAT, gpu::UV));
     uniformsBuffer = std::make_shared<gpu::Buffer>(sizeof(Uniforms), nullptr);
-    updatePipeline();
+
+    auto program = gpu::Shader::createProgram(shader::render_utils::program::hmd_ui);
+    gpu::StatePointer state = gpu::StatePointer(new gpu::State());
+    state->setDepthTest(gpu::State::DepthTest(true, true, gpu::LESS_EQUAL));
+    state->setBlendFunction(true,
+                            gpu::State::SRC_ALPHA, gpu::State::BLEND_OP_ADD, gpu::State::INV_SRC_ALPHA,
+                            gpu::State::FACTOR_ALPHA, gpu::State::BLEND_OP_ADD, gpu::State::ONE);
+
+    pipeline = gpu::Pipeline::create(program, state);
 }
 
-void HmdDisplayPlugin::HUDRenderer::updatePipeline() {
-    if (!pipeline) {
-        auto program = gpu::Shader::createProgram(shader::render_utils::program::hmd_ui);
-        gpu::StatePointer state = gpu::StatePointer(new gpu::State());
-        state->setDepthTest(gpu::State::DepthTest(true, true, gpu::LESS_EQUAL));
-        state->setBlendFunction(true,
-            gpu::State::SRC_ALPHA, gpu::State::BLEND_OP_ADD, gpu::State::INV_SRC_ALPHA,
-            gpu::State::FACTOR_ALPHA, gpu::State::BLEND_OP_ADD, gpu::State::ONE);
+std::function<void(gpu::Batch&, const gpu::TexturePointer&)> HmdDisplayPlugin::HUDRenderer::render() {
+    auto hudPipeline = pipeline;
+    auto hudFormat = format;
+    auto hudVertices = vertices;
+    auto hudIndices = indices;
+    auto hudUniformBuffer = uniformsBuffer;
+    auto hudUniforms = uniforms;
+    auto hudIndexCount = indexCount;
+    return [=](gpu::Batch& batch, const gpu::TexturePointer& hudTexture) {
+        if (hudPipeline && hudTexture) {
+            batch.setPipeline(hudPipeline);
 
-        pipeline = gpu::Pipeline::create(program, state);
-    }
-}
-
-std::function<void(gpu::Batch&, const gpu::TexturePointer&, bool mirror)> HmdDisplayPlugin::HUDRenderer::render(HmdDisplayPlugin& plugin) {
-    updatePipeline();
-    return [this](gpu::Batch& batch, const gpu::TexturePointer& hudTexture, bool mirror) {
-        if (pipeline && hudTexture) {
-            batch.setPipeline(pipeline);
-
-            batch.setInputFormat(format);
-            gpu::BufferView posView(vertices, VERTEX_OFFSET, vertices->getSize(), VERTEX_STRIDE, format->getAttributes().at(gpu::Stream::POSITION)._element);
-            gpu::BufferView uvView(vertices, TEXTURE_OFFSET, vertices->getSize(), VERTEX_STRIDE, format->getAttributes().at(gpu::Stream::TEXCOORD)._element);
+            batch.setInputFormat(hudFormat);
+            gpu::BufferView posView(hudVertices, VERTEX_OFFSET, hudVertices->getSize(), VERTEX_STRIDE, hudFormat->getAttributes().at(gpu::Stream::POSITION)._element);
+            gpu::BufferView uvView(hudVertices, TEXTURE_OFFSET, hudVertices->getSize(), VERTEX_STRIDE, hudFormat->getAttributes().at(gpu::Stream::TEXCOORD)._element);
             batch.setInputBuffer(gpu::Stream::POSITION, posView);
             batch.setInputBuffer(gpu::Stream::TEXCOORD, uvView);
-            batch.setIndexBuffer(gpu::UINT16, indices, 0);
-            uniformsBuffer->setSubData(0, uniforms);
-            batch.setUniformBuffer(0, uniformsBuffer);
+            batch.setIndexBuffer(gpu::UINT16, hudIndices, 0);
+            hudUniformBuffer->setSubData(0, hudUniforms);
+            batch.setUniformBuffer(0, hudUniformBuffer);
 
             auto compositorHelper = DependencyManager::get<CompositorHelper>();
             glm::mat4 modelTransform = compositorHelper->getUiTransform();
-            if (mirror) {
-                modelTransform = glm::scale(modelTransform, glm::vec3(-1, 1, 1));
-            }
             batch.setModelTransform(modelTransform);
             batch.setResourceTexture(0, hudTexture);
 
-            batch.drawIndexed(gpu::TRIANGLES, indexCount);
+            batch.drawIndexed(gpu::TRIANGLES, hudIndexCount);
         }
     };
 }
@@ -470,8 +483,8 @@ void HmdDisplayPlugin::compositePointer() {
     });
 }
 
-std::function<void(gpu::Batch&, const gpu::TexturePointer&, bool mirror)> HmdDisplayPlugin::getHUDOperator() {
-    return _hudRenderer.render(*this);
+std::function<void(gpu::Batch&, const gpu::TexturePointer&)> HmdDisplayPlugin::getHUDOperator() {
+    return _hudRenderer.render();
 }
 
 HmdDisplayPlugin::~HmdDisplayPlugin() {
@@ -479,4 +492,49 @@ HmdDisplayPlugin::~HmdDisplayPlugin() {
 
 float HmdDisplayPlugin::stutterRate() const {
     return _stutterRate.rate();
+}
+
+float adjustVisionSqueezeRatioForDevice(float visionSqueezeRatio, float visionSqueezeDeviceLow, float visionSqueezeDeviceHigh) {
+    if (visionSqueezeRatio <= 0.0f) {
+        return 0.0f;
+    }
+
+    float deviceRange = visionSqueezeDeviceHigh - visionSqueezeDeviceLow;
+    const float SQUEEZE_ADJUSTMENT = 0.75f; // magic number picked through experimentation
+    return deviceRange * (SQUEEZE_ADJUSTMENT * visionSqueezeRatio) + visionSqueezeDeviceLow;
+}
+
+void HmdDisplayPlugin::updateVisionSqueezeParameters(float visionSqueezeX, float visionSqueezeY,
+                                                     float visionSqueezeTransition,
+                                                     int visionSqueezePerEye, float visionSqueezeGroundPlaneY,
+                                                     float visionSqueezeSpotlightSize) {
+
+    visionSqueezeX = adjustVisionSqueezeRatioForDevice(visionSqueezeX, _visionSqueezeDeviceLowX, _visionSqueezeDeviceHighX);
+    visionSqueezeY = adjustVisionSqueezeRatioForDevice(visionSqueezeY, _visionSqueezeDeviceLowY, _visionSqueezeDeviceHighY);
+
+    auto& params = _visionSqueezeParametersBuffer.get<VisionSqueezeParameters>();
+    if (params._visionSqueezeX != visionSqueezeX) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeX = visionSqueezeX;
+    }
+    if (params._visionSqueezeY != visionSqueezeY) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeY = visionSqueezeY;
+    }
+    if (params._visionSqueezeTransition != visionSqueezeTransition) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeTransition = visionSqueezeTransition;
+    }
+    if (params._visionSqueezePerEye != visionSqueezePerEye) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezePerEye = visionSqueezePerEye;
+    }
+    if (params._visionSqueezeGroundPlaneY != visionSqueezeGroundPlaneY) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeGroundPlaneY = visionSqueezeGroundPlaneY;
+    }
+    if (params._visionSqueezeSpotlightSize != visionSqueezeSpotlightSize) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeSpotlightSize = visionSqueezeSpotlightSize;
+    }
+}
+
+void HmdDisplayPlugin::setupCompositeScenePipeline(gpu::Batch& batch) {
+    batch.setPipeline(_drawTextureSqueezePipeline);
+    _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._hmdSensorMatrix = _currentPresentFrameInfo.presentPose;
+    batch.setUniformBuffer(drawTextureWithVisionSqueezeParamsSlot, _visionSqueezeParametersBuffer);
 }

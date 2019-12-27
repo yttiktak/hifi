@@ -27,6 +27,12 @@ HMDScriptingInterface::HMDScriptingInterface() {
     connect(qApp, &Application::activeDisplayPluginChanged, [this]{
         emit displayModeChanged(isHMDMode());
     });
+    connect(qApp, &Application::miniTabletEnabledChanged, [this](bool enabled) {
+        emit miniTabletEnabledChanged(enabled);
+    });
+    connect(qApp, &Application::awayStateWhenFocusLostInVRChanged, [this](bool enabled) {
+        emit awayStateWhenFocusLostInVRChanged(enabled);
+    });
 }
 
 glm::vec3 HMDScriptingInterface::calculateRayUICollisionPoint(const glm::vec3& position, const glm::vec3& direction) const {
@@ -119,9 +125,29 @@ void HMDScriptingInterface::toggleShouldShowTablet() {
 }
 
 void HMDScriptingInterface::setShouldShowTablet(bool value) {
-    _showTablet = value;
-    _tabletContextualMode = false;
+    if (_showTablet != value) {
+        _showTablet = value;
+        _tabletContextualMode = false;
+        emit showTabletChanged(value);
+    }
 }
+
+void HMDScriptingInterface::setMiniTabletEnabled(bool enabled) {
+    qApp->setMiniTabletEnabled(enabled);
+}
+
+bool HMDScriptingInterface::getMiniTabletEnabled() {
+    return qApp->getMiniTabletEnabled();
+}
+
+void HMDScriptingInterface::setAwayStateWhenFocusLostInVREnabled(bool enabled) {
+    qApp->setAwayStateWhenFocusLostInVREnabled(enabled);
+}
+
+bool HMDScriptingInterface::getAwayStateWhenFocusLostInVREnabled() {
+    return qApp->getAwayStateWhenFocusLostInVREnabled();
+}
+
 
 QScriptValue HMDScriptingInterface::getHUDLookAtPosition2D(QScriptContext* context, QScriptEngine* engine) {
     glm::vec3 hudIntersection;
@@ -209,4 +235,84 @@ QVariant HMDScriptingInterface::getPlayAreaRect() {
 
 QVector<glm::vec3> HMDScriptingInterface::getSensorPositions() {
     return qApp->getActiveDisplayPlugin()->getSensorPositions();
+}
+
+float HMDScriptingInterface::getVisionSqueezeRatioX() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeRatioX();
+}
+
+float HMDScriptingInterface::getVisionSqueezeRatioY() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeRatioY();
+}
+
+void HMDScriptingInterface::setVisionSqueezeRatioX(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeRatioX(value);
+}
+
+void HMDScriptingInterface::setVisionSqueezeRatioY(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeRatioY(value);
+}
+
+float HMDScriptingInterface::getVisionSqueezeUnSqueezeDelay() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeUnSqueezeDelay();
+}
+
+void HMDScriptingInterface::setVisionSqueezeUnSqueezeDelay(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeUnSqueezeDelay(value);
+}
+
+float HMDScriptingInterface::getVisionSqueezeUnSqueezeSpeed() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeUnSqueezeSpeed();
+}
+
+void HMDScriptingInterface::setVisionSqueezeUnSqueezeSpeed(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeUnSqueezeSpeed(value);
+}
+
+float HMDScriptingInterface::getVisionSqueezeTransition() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeTransition();
+}
+
+void HMDScriptingInterface::setVisionSqueezeTransition(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeTransition(value);
+}
+
+int HMDScriptingInterface::getVisionSqueezePerEye() const {
+    return qApp->getVisionSqueeze().getVisionSqueezePerEye();
+}
+
+void HMDScriptingInterface::setVisionSqueezePerEye(int value) {
+    qApp->getVisionSqueeze().setVisionSqueezePerEye(value);
+}
+
+float HMDScriptingInterface::getVisionSqueezeGroundPlaneY() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeGroundPlaneY();
+}
+
+void HMDScriptingInterface::setVisionSqueezeGroundPlaneY(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeGroundPlaneY(value);
+}
+
+float HMDScriptingInterface::getVisionSqueezeSpotlightSize() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeSpotlightSize();
+}
+
+void HMDScriptingInterface::setVisionSqueezeSpotlightSize(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeSpotlightSize(value);
+}
+
+float HMDScriptingInterface::getVisionSqueezeTurningXFactor() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeTurningXFactor();
+}
+
+void HMDScriptingInterface::setVisionSqueezeTurningXFactor(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeTurningXFactor(value);
+}
+
+float HMDScriptingInterface::getVisionSqueezeTurningYFactor() const {
+    return qApp->getVisionSqueeze().getVisionSqueezeTurningYFactor();
+}
+
+void HMDScriptingInterface::setVisionSqueezeTurningYFactor(float value) {
+    qApp->getVisionSqueeze().setVisionSqueezeTurningYFactor(value);
 }

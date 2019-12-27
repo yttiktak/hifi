@@ -10,7 +10,8 @@
 #define hifi_RenderCommonTask_h
 
 #include <gpu/Pipeline.h>
-#include <render/RenderFetchCullSortTask.h>
+#include "LightStage.h"
+#include "HazeStage.h"
 #include "LightingModel.h"
 
 class BeginGPURangeTimer {
@@ -40,7 +41,7 @@ public:
 protected:
 };
 
-class DrawOverlay3DConfig : public render::Job::Config {
+class DrawLayered3DConfig : public render::Job::Config {
     Q_OBJECT
         Q_PROPERTY(int numDrawn READ getNumDrawn NOTIFY numDrawnChanged)
         Q_PROPERTY(int maxDrawn MEMBER maxDrawn NOTIFY dirty)
@@ -58,13 +59,13 @@ protected:
     int numDrawn{ 0 };
 };
 
-class DrawOverlay3D {
+class DrawLayered3D {
 public:
-    using Inputs = render::VaryingSet3<render::ItemBounds, LightingModelPointer, glm::vec2>;
-    using Config = DrawOverlay3DConfig;
-    using JobModel = render::Job::ModelI<DrawOverlay3D, Inputs, Config>;
+    using Inputs = render::VaryingSet4<render::ItemBounds, LightingModelPointer, HazeStage::FramePointer, glm::vec2>;
+    using Config = DrawLayered3DConfig;
+    using JobModel = render::Job::ModelI<DrawLayered3D, Inputs, Config>;
 
-    DrawOverlay3D(bool opaque);
+    DrawLayered3D(bool opaque);
 
     void configure(const Config& config) { _maxDrawn = config.maxDrawn; }
     void run(const render::RenderContextPointer& renderContext, const Inputs& inputs);
@@ -75,19 +76,45 @@ protected:
     bool _opaquePass { true };
 };
 
-class CompositeHUD {
-public:
-    using JobModel = render::Job::Model<CompositeHUD>;
-
-    CompositeHUD() {}
-    void run(const render::RenderContextPointer& renderContext);
-};
-
 class Blit {
 public:
     using JobModel = render::Job::ModelI<Blit, gpu::FramebufferPointer>;
 
     void run(const render::RenderContextPointer& renderContext, const gpu::FramebufferPointer& srcFramebuffer);
+};
+
+class NewFramebuffer {
+public:
+    using Output = gpu::FramebufferPointer;
+    using JobModel = render::Job::ModelO<NewFramebuffer, Output>;
+
+    NewFramebuffer(gpu::Element pixelFormat = gpu::Element::COLOR_SRGBA_32);
+
+    void run(const render::RenderContextPointer& renderContext, Output& output);
+protected:
+    gpu::Element _pixelFormat;
+private:
+    gpu::FramebufferPointer _outputFramebuffer;
+};
+
+class NewOrDefaultFramebuffer {
+public:
+    using Input = glm::uvec2;
+    using Output = gpu::FramebufferPointer;
+    using JobModel = render::Job::ModelIO<NewOrDefaultFramebuffer, Input, Output>;
+
+    void run(const render::RenderContextPointer& renderContext, const Input& input, Output& output);
+private:
+    gpu::FramebufferPointer _outputFramebuffer;
+};
+
+class ResolveFramebuffer {
+public:
+    using Inputs = render::VaryingSet2<gpu::FramebufferPointer, gpu::FramebufferPointer>;
+    using Outputs = gpu::FramebufferPointer;
+    using JobModel = render::Job::ModelIO<ResolveFramebuffer, Inputs, Outputs>;
+
+    void run(const render::RenderContextPointer& renderContext, const Inputs& source, Outputs& dest);
 };
 
 class ExtractFrustums {
@@ -106,10 +133,23 @@ public:
         FRUSTUM_COUNT
     };
 
-    using Output = render::VaryingArray<ViewFrustumPointer, FRUSTUM_COUNT>;
-    using JobModel = render::Job::ModelO<ExtractFrustums, Output>;
+    using Inputs = LightStage::ShadowFramePointer;
+    using Outputs = render::VaryingArray<ViewFrustumPointer, FRUSTUM_COUNT>;
+    using JobModel = render::Job::ModelIO<ExtractFrustums, Inputs, Outputs>;
 
-    void run(const render::RenderContextPointer& renderContext, Output& output);
+    void run(const render::RenderContextPointer& renderContext, const Inputs& inputs, Outputs& output);
+};
+
+class SetRenderMethod {
+public:
+    using JobModel = render::Job::Model<SetRenderMethod>;
+
+    SetRenderMethod(render::Args::RenderMethod method) : _method(method) {}
+
+    void run(const render::RenderContextPointer& renderContext) { renderContext->args->_renderMethod = _method; }
+
+protected:
+    render::Args::RenderMethod _method;
 };
 
 #endif // hifi_RenderDeferredTask_h

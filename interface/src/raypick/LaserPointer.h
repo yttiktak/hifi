@@ -19,10 +19,10 @@ public:
     class RenderState : public StartEndRenderState {
     public:
         RenderState() {}
-        RenderState(const OverlayID& startID, const OverlayID& pathID, const OverlayID& endID);
+        RenderState(const QUuid& startID, const QUuid& pathID, const QUuid& endID);
 
-        const OverlayID& getPathID() const { return _pathID; }
-        const bool& doesPathIgnoreRays() const { return _pathIgnoreRays; }
+        const QUuid& getPathID() const { return _pathID; }
+        const bool& doesPathIgnorePicks() const { return _pathIgnorePicks; }
 
         void setLineWidth(float width) { _lineWidth = width; }
         float getLineWidth() const { return _lineWidth; }
@@ -33,14 +33,16 @@ public:
                     bool faceAvatar, bool followNormal, float followNormalStrength, float distance, const PickResultPointer& pickResult) override;
 
     private:
-        OverlayID _pathID;
-        bool _pathIgnoreRays;
+        QUuid _pathID;
 
+        bool _pathIgnorePicks;
         float _lineWidth;
     };
 
     LaserPointer(const QVariant& rayProps, const RenderStateMap& renderStates, const DefaultRenderStateMap& defaultRenderStates, bool hover, const PointerTriggers& triggers,
         bool faceAvatar, bool followNormal, float followNormalStrength, bool centerEndY, bool lockEnd, bool distanceScaleEnd, bool scaleWithParent, bool enabled);
+
+    PickQuery::PickType getType() const override;
 
     QVariantMap toVariantMap() const override;
 

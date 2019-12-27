@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include <QDebug>
+#include "ShaderConstants.h"
 
 #include "GPULogging.h"
 
@@ -44,7 +45,7 @@ size_t Batch::_dataMax{ BATCH_PREALLOCATE_MIN };
 size_t Batch::_objectsMax{ BATCH_PREALLOCATE_MIN };
 size_t Batch::_drawCallInfosMax{ BATCH_PREALLOCATE_MIN };
 
-Batch::Batch(const char* name) {
+Batch::Batch(const std::string& name) {
     _name = name;
     _commands.reserve(_commandsMax);
     _commandOffsets.reserve(_commandOffsetsMax);
@@ -63,7 +64,7 @@ Batch::~Batch() {
     _drawCallInfosMax = std::max(_drawCallInfos.size(), _drawCallInfosMax);
 }
 
-void Batch::setName(const char* name) {
+void Batch::setName(const std::string& name) {
     _name = name;
 }
 
@@ -95,7 +96,7 @@ void Batch::clear() {
     _textureTables.clear();
     _transforms.clear();
 
-    _name = nullptr;
+    _name.clear();
     _invalidModel = true;
     _currentModel = Transform();
     _drawcallUniform = 0;
@@ -424,6 +425,13 @@ void Batch::generateTextureMips(const TexturePointer& texture) {
     ADD_COMMAND(generateTextureMips);
 
     _params.emplace_back(_textures.cache(texture));
+}
+
+void Batch::generateTextureMipsWithPipeline(const TexturePointer& texture, int numMips) {
+    ADD_COMMAND(generateTextureMipsWithPipeline);
+
+    _params.emplace_back(_textures.cache(texture));
+    _params.emplace_back(numMips);
 }
 
 void Batch::beginQuery(const QueryPointer& query) {

@@ -11,6 +11,8 @@
 
 #include "EntityItem.h"
 
+#include "PulsePropertyGroup.h"
+
 namespace entity {
     enum Shape {
         Triangle,
@@ -31,7 +33,7 @@ namespace entity {
     };
 
     Shape shapeFromString(const ::QString& shapeString);
-    ::QString stringFromShape(Shape shape);
+    QString stringFromShape(Shape shape);
 }
 
 class ShapeEntityItem : public EntityItem {
@@ -58,7 +60,7 @@ public:
     EntityPropertyFlags getEntityProperties(EncodeBitstreamParams& params) const override;
 
     void appendSubclassData(OctreePacketData* packetData, EncodeBitstreamParams& params,
-                                    EntityTreeElementExtraEncodeDataPointer modelTreeElementExtraEncodeData,
+                                    EntityTreeElementExtraEncodeDataPointer entityTreeElementExtraEncodeData,
                                     EntityPropertyFlags& requestedProperties,
                                     EntityPropertyFlags& propertyFlags,
                                     EntityPropertyFlags& propertiesDidntFit,
@@ -70,26 +72,18 @@ public:
                                                 EntityPropertyFlags& propertyFlags, bool overwriteLocalData,
                                                 bool& somethingChanged) override;
 
-    entity::Shape getShape() const { return _shape; }
+    entity::Shape getShape() const;
     void setShape(const entity::Shape& shape);
     void setShape(const QString& shape) { setShape(entity::shapeFromString(shape)); }
 
-    float getAlpha() const { return _alpha; };
+    float getAlpha() const;
     void setAlpha(float alpha);
 
-    const rgbColor& getColor() const { return _color; }
-    void setColor(const rgbColor& value);
+    glm::u8vec3 getColor() const;
+    void setColor(const glm::u8vec3& value);
 
     void setUnscaledDimensions(const glm::vec3& value) override;
 
-    xColor getXColor() const;
-    void setColor(const xColor& value);
-
-    QColor getQColor() const;
-    void setColor(const QColor& value);
-
-    bool shouldBePhysical() const override { return !isDead(); }
-    
     bool supportsDetailedIntersection() const override;
     bool findDetailedRayIntersection(const glm::vec3& origin, const glm::vec3& direction,
                                                 OctreeElementPointer& element, float& distance,
@@ -105,20 +99,18 @@ public:
     virtual void computeShapeInfo(ShapeInfo& info) override;
     virtual ShapeType getShapeType() const override;
 
-    std::shared_ptr<graphics::Material> getMaterial() { return _material; }
+    PulsePropertyGroup getPulseProperties() const;
 
 protected:
-
+    glm::u8vec3 _color;
     float _alpha { 1.0f };
-    rgbColor _color;
+    PulsePropertyGroup _pulseProperties;
     entity::Shape _shape { entity::Shape::Sphere };
 
     //! This is SHAPE_TYPE_ELLIPSOID rather than SHAPE_TYPE_NONE to maintain
     //! prior functionality where new or unsupported shapes are treated as
     //! ellipsoids.
-    ShapeType _collisionShapeType{ ShapeType::SHAPE_TYPE_ELLIPSOID };
-
-    std::shared_ptr<graphics::Material> _material;
+    ShapeType _collisionShapeType { ShapeType::SHAPE_TYPE_ELLIPSOID };
 };
 
 #endif // hifi_ShapeEntityItem_h

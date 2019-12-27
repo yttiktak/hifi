@@ -9,11 +9,11 @@
 #  Windows doesn't need this, and building it currently make Linux unstable.
 #  if (NOT WIN32)
 
-if (APPLE)
+if (FALSE AND APPLE)
 
     set(TARGET_NAME oculusLegacy)
     setup_hifi_plugin()
-    link_hifi_libraries(shared gl gpu plugins ui ui-plugins display-plugins input-plugins midi ${PLATFORM_GL_BACKEND})
+    link_hifi_libraries(shared shaders gl gpu plugins ui ui-plugins display-plugins input-plugins midi ${PLATFORM_GL_BACKEND})
     
     include_hifi_library_headers(octree)
     

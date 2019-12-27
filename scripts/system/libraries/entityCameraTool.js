@@ -98,16 +98,18 @@ CameraManager = function() {
     }
 
     function getActionForKeyEvent(event) {
-        var action = keyToActionMapping[event.key];
-        if (action !== undefined) {
-            if (event.isShifted) {
-                if (action === "orbitForward") {
-                    action = "orbitUp";
-                } else if (action === "orbitBackward") {
-                    action = "orbitDown";
+        if (!event.isControl) {
+            var action = keyToActionMapping[event.key];
+            if (action !== undefined) {
+                if (event.isShifted) {
+                    if (action === "orbitForward") {
+                        action = "orbitUp";
+                    } else if (action === "orbitBackward") {
+                        action = "orbitDown";
+                    }
                 }
+                return action;
             }
-            return action;
         }
         return null;
     }
@@ -353,7 +355,7 @@ CameraManager = function() {
             return;
         }
 
-        if (event.isRightButton || (event.isLeftButton && event.isControl && !event.isShifted)) {
+        if (event.isRightButton || (event.isLeftButton && event.isAlt && !event.isShifted)) {
             that.mode = MODE_ORBIT;
         } else if (event.isMiddleButton || (event.isLeftButton && event.isControl && event.isShifted)) {
             that.mode = MODE_PAN;

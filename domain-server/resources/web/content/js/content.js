@@ -4,16 +4,109 @@ $(document).ready(function(){
   var RESTORE_SETTINGS_FILE_ID = 'restore-settings-file';
   var UPLOAD_CONTENT_ALLOWED_DIV_ID = 'upload-content-allowed';
   var UPLOAD_CONTENT_RECOVERING_DIV_ID = 'upload-content-recovering';
+  var INSTALLED_CONTENT_FILENAME_ID = 'installed-content-filename';
+  var INSTALLED_CONTENT_NAME_ID = 'installed-content-name';
+  var INSTALLED_CONTENT_CREATED_ID = 'installed-content-created';
+  var INSTALLED_CONTENT_INSTALLED_ID = 'installed-content-installed';
+  var INSTALLED_CONTENT_INSTALLED_BY_ID = 'installed-content-installed-by';
 
   var isRestoring = false;
+  var restoreErrorShown = false;
 
   function progressBarHTML(extraClass, label) {
     var html = "<div class='progress'>";
     html += "<div class='" + extraClass + " progress-bar progress-bar-success progress-bar-striped active' role='progressbar' aria-valuemin='0' aria-valuemax='100'>";
-    html += label + "<span class='sr-only'></span></div></div>";
+    html += "<span class='ongoing-msg'></span></div></div>";
     return html;
   }
 
+  function showUploadProgress(title) {
+    swal({
+      title: title,
+      text: progressBarHTML('upload-content-progress', 'Upload'),
+      html: true,
+      showConfirmButton: false,
+      allowEscapeKey: false
+    });
+  }
+
+  function uploadNextChunk(file, offset, id) {
+      if (offset == undefined) {
+          offset = 0;
+      }
+      if (id == undefined) {
+          // Identify this upload session
+          id = Math.round(Math.random() * 2147483647);
+      }
+
+      var fileSize = file.size;
+      var filename = file.name;
+
+      var CHUNK_SIZE = 1048576; // 1 MiB
+
+      var isFinal = Boolean(fileSize - offset <= CHUNK_SIZE);
+      var nextChunkSize = Math.min(fileSize - offset, CHUNK_SIZE);
+      var chunk = file.slice(offset, offset + nextChunkSize, file.type);
+      var chunkFormData = new FormData();
+
+      var formItemName = 'restore-file-chunk';
+      if (offset == 0) {
+          formItemName = isFinal ? 'restore-file-chunk-only' : 'restore-file-chunk-initial';
+      } else if (isFinal) {
+          formItemName = 'restore-file-chunk-final';
+      }
+
+      chunkFormData.append(formItemName, chunk, filename);
+      var ajaxParams = {
+        url: '/content/upload',
+        type: 'POST',
+        timeout: 30000, // 30 s
+        headers: {"X-Session-Id": id},
+        cache: false,
+        processData: false,
+        contentType: false,
+        data: chunkFormData
+      };
+
+      var ajaxObject = $.ajax(ajaxParams);
+      ajaxObject.fail(function (jqXHR, textStatus, errorThrown) {
+        // status of 0 means the connection was reset, which
+        // happens after the content is parsed and the server restarts
+        // in the case of json and json.gz files
+        if (jqXHR.status != 0) {
+          showErrorMessage(
+            "Error",
+            "There was a problem restoring domain content.\n"
+            + "Please ensure that the content archive or entity file is valid and try again."
+          );
+        } else {
+            isRestoring = true;
+
+            // immediately reload backup information since one should be restoring now
+            reloadBackupInformation();
+
+            swal.close();
+        }
+      });
+
+      updateProgressBars($('.upload-content-progress'), (offset + nextChunkSize) * 100 / fileSize);
+
+      if (!isFinal) {
+        ajaxObject.done(function (data, textStatus, jqXHR)
+          { uploadNextChunk(file, offset + CHUNK_SIZE, id); });
+      } else {
+        ajaxObject.done(function(data, textStatus, jqXHR) {
+          isRestoring = true;
+
+          // immediately reload backup information since one should be restoring now
+          reloadBackupInformation();
+
+          swal.close();
+        });
+      }
+      
+    }
+  
   function setupBackupUpload() {
     // construct the HTML needed for the settings backup panel
     var html = "<div class='form-group'><div id='" + UPLOAD_CONTENT_ALLOWED_DIV_ID + "'>";
@@ -28,8 +121,23 @@ $(document).ready(function(){
     html += "<span class='help-block'>Restore in progress</span>";
     html += progressBarHTML('recovery', 'Restoring');
     html += "</div></div>";
-
     $('#' + Settings.UPLOAD_CONTENT_BACKUP_PANEL_ID + ' .panel-body').html(html);
+  }
+
+  function setupInstalledContentInfo() {
+    var html = "<table class='table table-bordered'><tbody>";
+    html += "<tr class='headers'><td class='data'><strong>Name</strong></td>";
+    html += "<td class='data'><strong>File Name</strong></td>";
+    html += "<td class='data'><strong>Created</strong></td>";
+    html += "<td class='data'><strong>Installed</strong></td>";
+    html += "<td class='data'><strong>Installed By</strong></td></tr>";
+    html += "<tr><td class='data' id='" + INSTALLED_CONTENT_NAME_ID + "'/>";
+    html += "<td class='data' id='" + INSTALLED_CONTENT_FILENAME_ID + "'/>";
+    html += "<td class='data' id='" + INSTALLED_CONTENT_CREATED_ID + "'/>";
+    html += "<td class='data' id='" + INSTALLED_CONTENT_INSTALLED_ID + "'/>";
+    html += "<td class='data' id='" + INSTALLED_CONTENT_INSTALLED_BY_ID + "'/></tr>";
+    html += "</tbody></table>";
+    $('#' + Settings.INSTALLED_CONTENT + ' .panel-body').html(html);
   }
 
   // handle content archive or entity file upload
@@ -50,39 +158,17 @@ $(document).ready(function(){
       "Restore content",
       function() {
         var files = $('#' + RESTORE_SETTINGS_FILE_ID).prop('files');
+        var file = files[0];
 
-        var fileFormData = new FormData();
-        fileFormData.append('restore-file', files[0]);
-
-        showSpinnerAlert("Uploading content to restore");
-
-        $.ajax({
-          url: '/content/upload',
-          type: 'POST',
-          cache: false,
-          processData: false,
-          contentType: false,
-          data: fileFormData
-        }).done(function(data, textStatus, jqXHR) {
-          isRestoring = true;
-
-          // immediately reload backup information since one should be restoring now
-          reloadBackupInformation();
-
-          swal.close();
-        }).fail(function(jqXHR, textStatus, errorThrown) {
-          showErrorMessage(
-            "Error",
-            "There was a problem restoring domain content.\n"
-            + "Please ensure that the content archive or entity file is valid and try again."
-          );
-        });
+        showUploadProgress("Uploading " + file.name);
+        uploadNextChunk(file);
       }
     );
   });
 
   var GENERATE_ARCHIVE_BUTTON_ID = 'generate-archive-button';
   var CONTENT_ARCHIVES_NORMAL_ID = 'content-archives-success';
+  var CONTENT_ARCHIVES_CONTENT_INFO_ID = 'content-archives-content-info';
   var CONTENT_ARCHIVES_ERROR_ID = 'content-archives-error';
   var AUTOMATIC_ARCHIVES_TABLE_ID = 'automatic-archives-table';
   var AUTOMATIC_ARCHIVES_TBODY_ID = 'automatic-archives-tbody';
@@ -167,19 +253,38 @@ $(document).ready(function(){
     checkBackupStatus();
   });
 
+  function updateProgressBars($progressBar, value) {
+    $progressBar.attr('aria-valuenow', value).attr('style', 'width: ' + value + '%');
+    $progressBar.find('.ongoing-msg').html(" " + Math.round(value) + "%");
+  }
+
   function reloadBackupInformation() {
     // make a GET request to get backup information to populate the table
     $.ajax({
       url: '/api/backups',
       cache: false
     }).done(function(data) {
-
       // split the returned data into manual and automatic manual backups
       var splitBackups = _.partition(data.backups, function(value, index) {
         return value.isManualBackup;
       });
-
-      if (isRestoring && !data.status.isRecovering) {
+      if (data.status.recoveryError && !restoreErrorShown) {
+        restoreErrorShown = true;
+        swal({
+          title: "Error",
+          text: "There was a problem restoring domain content.\n"
+          + data.status.recoveryError,
+          type: "error",
+          showCancelButton: false,
+          confirmButtonText: "Restart",
+          closeOnConfirm: true,
+        },
+        function () {
+          $.get("/restart");
+          showRestartModal();
+        });
+      }
+      if (isRestoring && !data.status.isRecovering && !data.status.recoveryError) {
         // we were recovering and we finished - the DS is going to restart so show the restart modal
         showRestartModal();
         return;
@@ -201,11 +306,6 @@ $(document).ready(function(){
           + "<li><a class='" + BACKUP_RESTORE_LINK_CLASS + "' href='#'>Restore from here</a></li><li class='divider'></li>"
           + "<li><a class='" + BACKUP_DOWNLOAD_LINK_CLASS + "' data-backup-id='" + backup.id + "' href='#'>Download</a></li><li class='divider'></li>"
           + "<li><a class='" + BACKUP_DELETE_LINK_CLASS + "' href='#' target='_blank'>Delete</a></li></ul></div></td>";
-      }
-
-      function updateProgressBars($progressBar, value) {
-        $progressBar.attr('aria-valuenow', value).attr('style', 'width: ' + value + '%');
-        $progressBar.find('.sr-only').html(value + "% Complete");
       }
 
       // before we add any new rows and update existing ones
@@ -274,6 +374,12 @@ $(document).ready(function(){
       // hide or show the manual content upload file and button depending on our recovering status
       $('#' + UPLOAD_CONTENT_ALLOWED_DIV_ID).toggle(!data.status.isRecovering);
       $('#' + UPLOAD_CONTENT_RECOVERING_DIV_ID).toggle(data.status.isRecovering);
+
+      $('#' + INSTALLED_CONTENT_NAME_ID).text(data.installed_content.name);
+      $('#' + INSTALLED_CONTENT_FILENAME_ID).text(data.installed_content.filename);
+      $('#' + INSTALLED_CONTENT_CREATED_ID).text(data.installed_content.creation_time ? moment(data.installed_content.creation_time).format('lll') : "");
+      $('#' + INSTALLED_CONTENT_INSTALLED_ID).text(data.installed_content.install_time ? moment(data.installed_content.install_time).format('lll') : "");
+      $('#' + INSTALLED_CONTENT_INSTALLED_BY_ID).text(data.installed_content.installed_by);
 
       // update the progress bars for current restore status
       if (data.status.isRecovering) {
@@ -462,6 +568,7 @@ $(document).ready(function(){
   Settings.afterReloadActions = function() {
     setupBackupUpload();
     setupContentArchives();
+    setupInstalledContentInfo();
 
     // load the latest backups immediately
     reloadBackupInformation();

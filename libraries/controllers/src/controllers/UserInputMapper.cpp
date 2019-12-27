@@ -256,6 +256,9 @@ void UserInputMapper::update(float deltaTime) {
     for (auto& channel : _actionStates) {
         channel = 0.0f;
     }
+    for (unsigned int i = 0; i < _actionStatesValid.size(); i++) {
+        _actionStatesValid[i] = true;
+    }
 
     for (auto& channel : _poseStates) {
         channel = Pose();
@@ -290,17 +293,17 @@ void UserInputMapper::update(float deltaTime) {
     if ((int)_lastStandardStates.size() != standardInputs.size()) {
         _lastStandardStates.resize(standardInputs.size());
         for (auto& lastValue : _lastStandardStates) {
-            lastValue = 0;
+            lastValue = AxisValue();
         }
     }
 
     for (int i = 0; i < standardInputs.size(); ++i) {
         const auto& input = standardInputs[i].first;
-        float value = getValue(input);
-        float& oldValue = _lastStandardStates[i];
+        AxisValue value = getValue(input);
+        AxisValue& oldValue = _lastStandardStates[i];
         if (value != oldValue) {
             oldValue = value;
-            emit inputEvent(input.id, value);
+            emit inputEvent(input.id, value.value);
         }
     }
     inputRecorder->frameTick();
@@ -489,6 +492,21 @@ void UserInputMapper::runMappings() {
     }
     applyRoutes(_standardRoutes);
 
+    InputRecorder* inputRecorder = InputRecorder::getInstance();
+    if (inputRecorder->isPlayingback()) {
+        if (debugRoutes) {
+            qCDebug(controllers) << "Playing back recording actions";
+        }
+
+        // Play back each numeric action even if there is no current route active for the action.
+        auto actionStates = inputRecorder->getActionstates();
+        for (InputRecorder::ActionStates::iterator it = actionStates.begin(); it != actionStates.end(); ++it) {
+            setActionState((Action)findAction(it->first), it->second);
+        }
+
+        // Poses are played back in StandardEndpoint.
+    }
+
     if (debugRoutes) {
         qCDebug(controllers) << "Done with mappings";
     }
@@ -604,10 +622,10 @@ bool UserInputMapper::applyRoute(const Route::Pointer& route, bool force) {
         destination->apply(value, source);
     } else {
         // Fetch the value, may have been overriden by previous loopback routes
-        float value = getValue(source, route->peek);
+        auto value = getValue(source, route->peek);
 
         if (debugRoutes && route->debug) {
-            qCDebug(controllers) << "Value was " << value;
+            qCDebug(controllers) << "Value was " << value.value << value.timestamp;
         }
         // Apply each of the filters.
         for (const auto& filter : route->filters) {
@@ -615,7 +633,7 @@ bool UserInputMapper::applyRoute(const Route::Pointer& route, bool force) {
         }
 
         if (debugRoutes && route->debug) {
-            qCDebug(controllers) << "Filtered value was " << value;
+            qCDebug(controllers) << "Filtered value was " << value.value << value.timestamp;
         }
 
         destination->apply(value, source);
@@ -741,15 +759,15 @@ void UserInputMapper::enableMapping(const QString& mappingName, bool enable) {
     }
 }
 
-float UserInputMapper::getValue(const Endpoint::Pointer& endpoint, bool peek) {
+AxisValue UserInputMapper::getValue(const Endpoint::Pointer& endpoint, bool peek) {
     return peek ? endpoint->peek() : endpoint->value();
 }
 
-float UserInputMapper::getValue(const Input& input) const {
+AxisValue UserInputMapper::getValue(const Input& input) const {
     Locker locker(_lock);
     auto endpoint = endpointFor(input);
     if (!endpoint) {
-        return 0;
+        return AxisValue();
     }
     return endpoint->value();
 }
@@ -1217,6 +1235,18 @@ void UserInputMapper::disableMapping(const Mapping::Pointer& mapping) {
         debuggableRoutes = hasDebuggableRoute(_deviceRoutes) || hasDebuggableRoute(_standardRoutes);
     }
 }
+
+void UserInputMapper::setActionState(Action action, float value, bool valid) {
+    _actionStates[toInt(action)] = value;
+    _actionStatesValid[toInt(action)] = valid;
+}
+
+void UserInputMapper::deltaActionState(Action action, float delta, bool valid) {
+    _actionStates[toInt(action)] += delta;
+    bool wasValid = _actionStatesValid[toInt(action)];
+    _actionStatesValid[toInt(action)] = wasValid & valid;
+}
+
 
 }
 

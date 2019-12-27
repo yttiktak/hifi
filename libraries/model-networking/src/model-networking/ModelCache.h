@@ -15,39 +15,36 @@
 #include <DependencyManager.h>
 #include <ResourceCache.h>
 
-#include <graphics/Material.h>
 #include <graphics/Asset.h>
 
-#include "FBXReader.h"
-#include "TextureCache.h"
+#include "FBXSerializer.h"
+#include <procedural/ProceduralMaterialCache.h>
+#include <material-networking/TextureCache.h>
+#include "ModelLoader.h"
 
-// Alias instead of derive to avoid copying
+using GeometryMappingPair = std::pair<QUrl, QVariantHash>;
+Q_DECLARE_METATYPE(GeometryMappingPair)
 
-class NetworkTexture;
-class NetworkMaterial;
-class MeshPart;
-
-class GeometryMappingResource;
-
-class Geometry {
+class NetworkModel {
 public:
-    using Pointer = std::shared_ptr<Geometry>;
-    using WeakPointer = std::weak_ptr<Geometry>;
+    using Pointer = std::shared_ptr<NetworkModel>;
+    using WeakPointer = std::weak_ptr<NetworkModel>;
 
-    Geometry() = default;
-    Geometry(const Geometry& geometry);
-    virtual ~Geometry() {}
+    NetworkModel() = default;
+    NetworkModel(const NetworkModel& geometry);
+    virtual ~NetworkModel() = default;
 
     // Immutable over lifetime
     using GeometryMeshes = std::vector<std::shared_ptr<const graphics::Mesh>>;
-    using GeometryMeshParts = std::vector<std::shared_ptr<const MeshPart>>;
 
     // Mutable, but must retain structure of vector
     using NetworkMaterials = std::vector<std::shared_ptr<NetworkMaterial>>;
 
-    bool isGeometryLoaded() const { return (bool)_fbxGeometry; }
+    bool isHFMModelLoaded() const { return (bool)_hfmModel; }
 
-    const FBXGeometry& getFBXGeometry() const { return *_fbxGeometry; }
+    const HFMModel& getHFMModel() const { return *_hfmModel; }
+    const HFMModel::ConstPointer& getConstHFMModelPointer() const { return _hfmModel; }
+    const MaterialMapping& getMaterialMapping() const { return _materialMapping; }
     const GeometryMeshes& getMeshes() const { return *_meshes; }
     const std::shared_ptr<NetworkMaterial> getShapeMaterial(int shapeID) const;
 
@@ -59,12 +56,10 @@ public:
     const QVariantHash& getMapping() const { return _mapping; }
 
 protected:
-    friend class GeometryMappingResource;
-
     // Shared across all geometries, constant throughout lifetime
-    std::shared_ptr<const FBXGeometry> _fbxGeometry;
+    HFMModel::ConstPointer _hfmModel;
+    MaterialMapping _materialMapping;
     std::shared_ptr<const GeometryMeshes> _meshes;
-    std::shared_ptr<const GeometryMeshParts> _meshParts;
 
     // Copied to each geometry, mutable throughout lifetime via setTextures
     NetworkMaterials _materials;
@@ -77,42 +72,60 @@ private:
 };
 
 /// A geometry loaded from the network.
-class GeometryResource : public Resource, public Geometry {
+class ModelResource : public Resource, public NetworkModel {
+    Q_OBJECT
 public:
-    using Pointer = QSharedPointer<GeometryResource>;
+    using Pointer = QSharedPointer<ModelResource>;
 
-    GeometryResource(const QUrl& url, const QUrl& textureBaseUrl = QUrl()) :
-        Resource(url), _textureBaseUrl(textureBaseUrl) {}
+    ModelResource(const QUrl& url, const ModelLoader& modelLoader) : Resource(url), _modelLoader(modelLoader) {}
+    ModelResource(const ModelResource& other);
 
-    virtual bool areTexturesLoaded() const override { return isLoaded() && Geometry::areTexturesLoaded(); }
+    QString getType() const override { return "Model"; }
 
     virtual void deleter() override;
 
+    virtual void downloadFinished(const QByteArray& data) override;
+    void setExtra(void* extra) override;
+
+    virtual bool areTexturesLoaded() const override { return isLoaded() && NetworkModel::areTexturesLoaded(); }
+
+private slots:
+    void onGeometryMappingLoaded(bool success);
+
 protected:
     friend class ModelCache;
-    friend class GeometryMappingResource;
+
+    Q_INVOKABLE void setGeometryDefinition(HFMModel::Pointer hfmModel, const MaterialMapping& materialMapping);
 
     // Geometries may not hold onto textures while cached - that is for the texture cache
     // Instead, these methods clear and reset textures from the geometry when caching/loading
-    bool shouldSetTextures() const { return _fbxGeometry && _materials.empty(); }
+    bool shouldSetTextures() const { return _hfmModel && _materials.empty(); }
     void setTextures();
     void resetTextures();
 
-    QUrl _textureBaseUrl;
-
     virtual bool isCacheable() const override { return _loaded && _isCacheable; }
-    bool _isCacheable { true };
+
+private:
+    ModelLoader _modelLoader;
+    GeometryMappingPair _mappingPair;
+    QUrl _textureBaseURL;
+    bool _combineParts;
+
+    ModelResource::Pointer _modelResource;
+    QMetaObject::Connection _connection;
+
+    bool _isCacheable{ true };
 };
 
-class GeometryResourceWatcher : public QObject {
+class ModelResourceWatcher : public QObject {
     Q_OBJECT
 public:
-    using Pointer = std::shared_ptr<GeometryResourceWatcher>;
+    using Pointer = std::shared_ptr<ModelResourceWatcher>;
 
-    GeometryResourceWatcher() = delete;
-    GeometryResourceWatcher(Geometry::Pointer& geometryPtr) : _geometryRef(geometryPtr) {}
+    ModelResourceWatcher() = delete;
+    ModelResourceWatcher(NetworkModel::Pointer& geometryPtr) : _networkModelRef(geometryPtr) {}
 
-    void setResource(GeometryResource::Pointer resource);
+    void setResource(ModelResource::Pointer resource);
 
     QUrl getURL() const { return (bool)_resource ? _resource->getURL() : QUrl(); }
     int getResourceDownloadAttempts() { return _resource ? _resource->getDownloadAttempts() : 0; }
@@ -130,8 +143,8 @@ private slots:
     void resourceRefreshed();
 
 private:
-    GeometryResource::Pointer _resource;
-    Geometry::Pointer& _geometryRef;
+    ModelResource::Pointer _resource;
+    NetworkModel::Pointer& _networkModelRef;
 };
 
 /// Stores cached model geometries.
@@ -141,81 +154,26 @@ class ModelCache : public ResourceCache, public Dependency {
 
 public:
 
-    GeometryResource::Pointer getGeometryResource(const QUrl& url,
-                                                  const QVariantHash& mapping = QVariantHash(),
+    ModelResource::Pointer getModelResource(const QUrl& url,
+                                                  const GeometryMappingPair& mapping =
+                                                        GeometryMappingPair(QUrl(), QVariantHash()),
                                                   const QUrl& textureBaseUrl = QUrl());
 
-    GeometryResource::Pointer getCollisionGeometryResource(const QUrl& url,
-                                                           const QVariantHash& mapping = QVariantHash(),
+    ModelResource::Pointer getCollisionModelResource(const QUrl& url,
+                                                           const GeometryMappingPair& mapping =
+                                                                 GeometryMappingPair(QUrl(), QVariantHash()),
                                                            const QUrl& textureBaseUrl = QUrl());
 
 protected:
-    friend class GeometryMappingResource;
+    friend class ModelResource;
 
-    virtual QSharedPointer<Resource> createResource(const QUrl& url, const QSharedPointer<Resource>& fallback,
-                                                    const void* extra) override;
+    virtual QSharedPointer<Resource> createResource(const QUrl& url) override;
+    QSharedPointer<Resource> createResourceCopy(const QSharedPointer<Resource>& resource) override;
 
 private:
     ModelCache();
     virtual ~ModelCache() = default;
-};
-
-class NetworkMaterial : public graphics::Material {
-public:
-    using MapChannel = graphics::Material::MapChannel;
-
-    NetworkMaterial() : _textures(MapChannel::NUM_MAP_CHANNELS) {}
-    NetworkMaterial(const FBXMaterial& material, const QUrl& textureBaseUrl);
-    NetworkMaterial(const NetworkMaterial& material);
-
-    void setAlbedoMap(const QUrl& url, bool useAlphaChannel);
-    void setNormalMap(const QUrl& url, bool isBumpmap);
-    void setRoughnessMap(const QUrl& url, bool isGloss);
-    void setMetallicMap(const QUrl& url, bool isSpecular);
-    void setOcclusionMap(const QUrl& url);
-    void setEmissiveMap(const QUrl& url);
-    void setScatteringMap(const QUrl& url);
-    void setLightmapMap(const QUrl& url);
-
-protected:
-    friend class Geometry;
-
-    class Texture {
-    public:
-        QString name;
-        NetworkTexturePointer texture;
-    };
-    using Textures = std::vector<Texture>;
-
-    Textures _textures;
-
-    static const QString NO_TEXTURE;
-    const QString& getTextureName(MapChannel channel);
-
-    void setTextures(const QVariantMap& textureMap);
-
-    const bool& isOriginal() const { return _isOriginal; }
-
-private:
-    // Helpers for the ctors
-    QUrl getTextureUrl(const QUrl& baseUrl, const FBXTexture& fbxTexture);
-    graphics::TextureMapPointer fetchTextureMap(const QUrl& baseUrl, const FBXTexture& fbxTexture,
-                                             image::TextureUsage::Type type, MapChannel channel);
-    graphics::TextureMapPointer fetchTextureMap(const QUrl& url, image::TextureUsage::Type type, MapChannel channel);
-
-    Transform _albedoTransform;
-    Transform _lightmapTransform;
-    vec2 _lightmapParams;
-
-    bool _isOriginal { true };
-};
-
-class MeshPart {
-public:
-    MeshPart(int mesh, int part, int material) : meshID { mesh }, partID { part }, materialID { material } {}
-    int meshID { -1 };
-    int partID { -1 };
-    int materialID { -1 };
+    ModelLoader _modelLoader;
 };
 
 #endif // hifi_ModelCache_h

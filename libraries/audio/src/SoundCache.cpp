@@ -30,19 +30,15 @@ SoundCache::SoundCache(QObject* parent) :
 }
 
 SharedSoundPointer SoundCache::getSound(const QUrl& url) {
-    if (QThread::currentThread() != thread()) {
-        SharedSoundPointer result;
-        BLOCKING_INVOKE_METHOD(this, "getSound", 
-                                  Q_RETURN_ARG(SharedSoundPointer, result), Q_ARG(const QUrl&, url));
-        return result;
-    }
     return getResource(url).staticCast<Sound>();
 }
 
-QSharedPointer<Resource> SoundCache::createResource(const QUrl& url, const QSharedPointer<Resource>& fallback,
-    const void* extra) {
-    qCDebug(audio) << "Requesting sound at" << url.toString();
+QSharedPointer<Resource> SoundCache::createResource(const QUrl& url) {
     auto resource = QSharedPointer<Resource>(new Sound(url), &Resource::deleter);
     resource->setLoadPriority(this, SOUNDS_LOADING_PRIORITY);
     return resource;
+}
+
+QSharedPointer<Resource> SoundCache::createResourceCopy(const QSharedPointer<Resource>& resource) {
+    return QSharedPointer<Resource>(new Sound(*resource.staticCast<Sound>()), &Resource::deleter);
 }

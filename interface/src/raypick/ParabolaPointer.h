@@ -10,6 +10,8 @@
 
 #include "PathPointer.h"
 
+#include <render/Item.h>
+
 class ParabolaPointer : public PathPointer {
     using Parent = PathPointer;
 public:
@@ -24,9 +26,8 @@ public:
                                bool isVisibleInSecondaryCamera, bool drawInFront, bool enabled);
             ~ParabolaRenderItem() {}
 
-            static gpu::PipelinePointer _parabolaPipeline;
-            static gpu::PipelinePointer _transparentParabolaPipeline;
-            const gpu::PipelinePointer getParabolaPipeline();
+            static std::map<std::pair<bool, bool>, gpu::PipelinePointer> _parabolaPipelines;
+            gpu::PipelinePointer getParabolaPipeline(bool forward) const;
 
             void render(RenderArgs* args);
             render::Item::Bound& editBound() { return _bound; }
@@ -79,7 +80,7 @@ public:
         };
 
         RenderState() {}
-        RenderState(const OverlayID& startID, const OverlayID& endID, const glm::vec3& pathColor, float pathAlpha, float parentScale,
+        RenderState(const QUuid& startID, const QUuid& endID, const glm::vec3& pathColor, float pathAlpha, float parentScale,
                     bool isVisibleInSecondaryCamera, bool drawInFront, bool pathEnabled);
 
         void setPathWidth(float width) { _pathWidth = width; }
@@ -99,6 +100,8 @@ public:
 
     ParabolaPointer(const QVariant& rayProps, const RenderStateMap& renderStates, const DefaultRenderStateMap& defaultRenderStates, bool hover, const PointerTriggers& triggers,
         bool faceAvatar, bool followNormal, float followNormalStrength, bool centerEndY, bool lockEnd, bool distanceScaleEnd, bool scaleWithAvatar, bool enabled);
+
+    PickQuery::PickType getType() const override;
 
     QVariantMap toVariantMap() const override;
 
